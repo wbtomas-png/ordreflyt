@@ -1,4 +1,3 @@
-// file: web/src/app/purchasing/[id]/page.tsx
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
@@ -75,20 +74,6 @@ function makeStoragePath(orderId: string, file: File) {
   return `orders/${orderId}/confirmation.${ext}`;
 }
 
-// Type guard: hindrer at vi caster "GenericStringError" til OrderRow ved build
-function isOrderRow(x: unknown): x is OrderRow {
-  if (!x || typeof x !== "object") return false;
-  const o = x as any;
-  return (
-    typeof o.id === "string" &&
-    typeof o.created_at === "string" &&
-    typeof o.status === "string" &&
-    typeof o.project_name === "string" &&
-    typeof o.contact_name === "string" &&
-    typeof o.delivery_address === "string"
-  );
-}
-
 export default function PurchasingOrderDetailsPage() {
   const router = useRouter();
   const params = useParams<{ id: string }>();
@@ -115,32 +100,24 @@ export default function PurchasingOrderDetailsPage() {
     let alive = true;
 
     (async () => {
-      setLoading(true);
-
-      const { data: auth } = await supabase.auth.getUser();
-      if (!auth.user) {
+      const { data } = await supabase.auth.getUser();
+      if (!data.user) {
         router.replace("/login");
         return;
       }
 
-      // Rolle-sjekk (knyttet til innlogget user)
-      const { data: prof, error: profErr } = await supabase
+      // Rolle-sjekk
+      const { data: prof } = await supabase
         .from("profiles")
         .select("role")
-        .eq("user_id", auth.user.id)
         .maybeSingle();
 
-      if (profErr) console.error(profErr);
-
-      const role = ((prof as any)?.role ?? "").toString().toUpperCase();
+      const role = (prof as any)?.role as string | undefined;
       const ok = role === "ADMIN" || role === "PURCHASER";
-
       if (!alive) return;
 
       setRoleOk(ok);
       if (!ok) {
-        setOrder(null);
-        setItems([]);
         setLoading(false);
         return;
       }
@@ -170,11 +147,11 @@ export default function PurchasingOrderDetailsPage() {
           ].join(", ")
         )
         .eq("id", id)
-        .maybeSingle();
+        .single();
 
       if (!alive) return;
 
-      if (oErr || !isOrderRow(o)) {
+      if (oErr || !o) {
         console.error(oErr);
         setOrder(null);
         setItems([]);
@@ -182,13 +159,13 @@ export default function PurchasingOrderDetailsPage() {
         return;
       }
 
-      setOrder(o);
+      setOrder(o as OrderRow);
 
-      setStatus(o.status ?? "SUBMITTED");
-      setEta(o.expected_delivery_date ?? "");
-      setInfo(o.delivery_info ?? "");
-      setConfirmPath(o.confirmation_file_path ?? "");
-      setNote(o.purchaser_note ?? "");
+      setStatus((o as any).status ?? "SUBMITTED");
+      setEta((o as any).expected_delivery_date ?? "");
+      setInfo((o as any).delivery_info ?? "");
+      setConfirmPath((o as any).confirmation_file_path ?? "");
+      setNote((o as any).purchaser_note ?? "");
 
       const { data: it, error: itErr } = await supabase
         .from("order_items")
@@ -281,13 +258,11 @@ export default function PurchasingOrderDetailsPage() {
       return;
     }
 
-    const nextStatus = status === "SUBMITTED" ? "CONFIRMED" : status;
-
     const { error: dbErr } = await supabase
       .from("orders")
       .update({
         confirmation_file_path: path,
-        status: nextStatus,
+        status: status === "SUBMITTED" ? "CONFIRMED" : status,
       })
       .eq("id", order.id);
 
@@ -300,13 +275,11 @@ export default function PurchasingOrderDetailsPage() {
     }
 
     setConfirmPath(path);
-    setStatus(nextStatus);
     setOrder((prev) =>
-      prev
-        ? { ...prev, confirmation_file_path: path, status: nextStatus }
-        : prev
+      prev ? { ...prev, confirmation_file_path: path } : prev
     );
 
+    // valgfritt: nullstill filvelger
     setUploadFile(null);
 
     alert("Ordrebekreftelse lastet opp og lagret.");

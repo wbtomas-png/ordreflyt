@@ -43,6 +43,7 @@ export default function LoginPage() {
             <h1 className="text-xl font-semibold">
               Logg inn
             </h1>
+
           </div>
 
           <button

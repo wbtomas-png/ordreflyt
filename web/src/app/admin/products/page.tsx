@@ -4,6 +4,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabaseBrowser } from "@/lib/supabase/browser";
+import { useRequireMe } from "@/lib/useRequireMe";
 
 type ProductRow = {
   id: string;
@@ -45,8 +46,10 @@ export default function AdminProductsPage() {
   const router = useRouter();
   const supabase = useMemo(() => supabaseBrowser(), []);
 
+  // Gate: må være invitert + admin
+  const { me, loading: meLoading } = useRequireMe({ requireRole: "admin" });
+
   const [loading, setLoading] = useState(true);
-  const [roleOk, setRoleOk] = useState<boolean | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const [items, setItems] = useState<ProductRow[]>([]);
@@ -59,28 +62,7 @@ export default function AdminProductsPage() {
   const [newPrice, setNewPrice] = useState<string>("");
   const [newActive, setNewActive] = useState(true);
 
-  async function checkAdmin(): Promise<boolean> {
-    const { data: auth } = await supabase.auth.getUser();
-    if (!auth.user) {
-      router.replace("/login");
-      return false;
-    }
-
-    const { data: prof, error: profErr } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("user_id", auth.user.id)
-      .maybeSingle();
-
-    if (profErr) console.error(profErr);
-
-    const role = ((prof as any)?.role ?? "").toString().toUpperCase();
-    const ok = role === "ADMIN";
-    setRoleOk(ok);
-    return ok;
-  }
-
-  async function loadProducts() {
+  async function loadProducts(searchTerm?: string) {
     setErrorMsg(null);
 
     let query = supabase
@@ -88,7 +70,7 @@ export default function AdminProductsPage() {
       .select("id, product_no, name, list_price, thumb_path, is_active, created_at")
       .order("created_at", { ascending: false });
 
-    const term = q.trim();
+    const term = (searchTerm ?? q).trim();
     if (term) {
       query = query.or(`product_no.ilike.%${term}%,name.ilike.%${term}%`);
     }
@@ -104,24 +86,26 @@ export default function AdminProductsPage() {
     setItems((data ?? []) as ProductRow[]);
   }
 
+  // Last data når tilgang er avklart
   useEffect(() => {
     let alive = true;
 
     (async () => {
-      setLoading(true);
-      setErrorMsg(null);
+      if (meLoading) return;
 
-      const ok = await checkAdmin();
-      if (!alive) return;
-
-      if (!ok) {
-        setLoading(false);
+      // Hooken skal normalt redirecte hvis ikke admin, men vi har safe fallback
+      if (!me?.ok || me.role !== "admin") {
+        if (alive) setLoading(false);
         return;
       }
 
-      await loadProducts();
       if (!alive) return;
+      setLoading(true);
+      setErrorMsg(null);
 
+      await loadProducts("");
+
+      if (!alive) return;
       setLoading(false);
     })();
 
@@ -129,12 +113,19 @@ export default function AdminProductsPage() {
       alive = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [meLoading, me?.ok, me?.role]);
 
+  // Søk: reload når q endrer seg (kun hvis admin er bekreftet)
   useEffect(() => {
-    if (roleOk) loadProducts();
+    if (meLoading) return;
+    if (!me?.ok || me.role !== "admin") return;
+
+    const t = setTimeout(() => {
+      loadProducts(q);
+    }, 150); // liten debounce
+    return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [q, roleOk]);
+  }, [q, meLoading, me?.ok, me?.role]);
 
   async function createNewProduct() {
     setErrorMsg(null);
@@ -191,7 +182,8 @@ export default function AdminProductsPage() {
     }
   }
 
-  if (loading) {
+  // Mens vi avklarer tilgang (invite-only + role), vis loader
+  if (meLoading) {
     return (
       <div className="p-6">
         <div className="text-sm text-gray-600">Laster…</div>
@@ -199,7 +191,8 @@ export default function AdminProductsPage() {
     );
   }
 
-  if (!roleOk) {
+  // Hooken vil vanligvis redirecte om ikke admin, men behold safe fallback UI
+  if (!me?.ok || me.role !== "admin") {
     return (
       <div className="p-6 space-y-3">
         <button
@@ -210,8 +203,16 @@ export default function AdminProductsPage() {
         </button>
 
         <div className="rounded-2xl border p-5 text-sm text-gray-700">
-          Du har ikke admin-tilgang. Rollen må være <b>ADMIN</b> i <code>profiles</code>.
+          Du har ikke admin-tilgang.
         </div>
+      </div>
+    );
+  }
+
+  if (loading) {
+    return (
+      <div className="p-6">
+        <div className="text-sm text-gray-600">Laster…</div>
       </div>
     );
   }
@@ -335,7 +336,7 @@ export default function AdminProductsPage() {
 
           <button
             className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50"
-            onClick={loadProducts}
+            onClick={() => loadProducts(q)}
           >
             Oppdater
           </button>

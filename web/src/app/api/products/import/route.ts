@@ -183,7 +183,15 @@ export async function POST(req: Request) {
       .upsert(productsForUpsert, { onConflict: "product_no" })
       .select("id, product_no");
 
-    if (upErr) return jsonError(500, "Upsert til products feilet.", upErr.message);
+    if (upErr) {
+  console.error("[import] upsert products error:", upErr);
+  return jsonError(500, "Upsert til products feilet.", {
+    message: (upErr as any)?.message,
+    code: (upErr as any)?.code,
+    details: (upErr as any)?.details,
+    hint: (upErr as any)?.hint,
+  });
+}
 
     // Map product_no -> id
     const idByNo = new Map<string, string>();
