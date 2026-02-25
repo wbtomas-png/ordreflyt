@@ -1,8 +1,11 @@
+// file: web/src/app/purchasing/[id]/page.tsx
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { supabaseBrowser } from "@/lib/supabase/browser";
+
+type Role = "kunde" | "admin" | "innkjøper";
 
 type OrderRow = {
   id: string;
@@ -74,16 +77,32 @@ function makeStoragePath(orderId: string, file: File) {
   return `orders/${orderId}/confirmation.${ext}`;
 }
 
+function isOrderRow(x: unknown): x is OrderRow {
+  if (!x || typeof x !== "object") return false;
+  const o = x as any;
+  return (
+    typeof o.id === "string" &&
+    typeof o.created_at === "string" &&
+    typeof o.status === "string" &&
+    typeof o.project_name === "string" &&
+    typeof o.contact_name === "string" &&
+    typeof o.delivery_address === "string"
+  );
+}
+
 export default function PurchasingOrderDetailsPage() {
   const router = useRouter();
   const params = useParams<{ id: string }>();
   const supabase = useMemo(() => supabaseBrowser(), []);
+
+  const orderId = params?.id;
 
   const [loading, setLoading] = useState(true);
   const [roleOk, setRoleOk] = useState<boolean | null>(null);
 
   const [order, setOrder] = useState<OrderRow | null>(null);
   const [items, setItems] = useState<OrderItemRow[]>([]);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const [status, setStatus] = useState<string>("SUBMITTED");
   const [eta, setEta] = useState<string>("");
@@ -100,30 +119,74 @@ export default function PurchasingOrderDetailsPage() {
     let alive = true;
 
     (async () => {
-      const { data } = await supabase.auth.getUser();
-      if (!data.user) {
-        router.replace("/login");
-        return;
-      }
+      setLoading(true);
+      setErrorMsg(null);
 
-      // Rolle-sjekk
-      const { data: prof } = await supabase
-        .from("profiles")
-        .select("role")
-        .maybeSingle();
-
-      const role = (prof as any)?.role as string | undefined;
-      const ok = role === "ADMIN" || role === "PURCHASER";
-      if (!alive) return;
-
-      setRoleOk(ok);
-      if (!ok) {
+      if (!orderId) {
+        setRoleOk(false);
+        setOrder(null);
+        setItems([]);
+        setErrorMsg("Mangler ordre-id i URL.");
         setLoading(false);
         return;
       }
 
-      const id = params.id;
+      // 1) Må være innlogget
+      const { data: userRes } = await supabase.auth.getUser();
+      if (!userRes.user) {
+        router.replace("/login");
+        return;
+      }
 
+      // 2) Token (refresh hvis nødvendig)
+      let token: string | null = null;
+      const { data: sessRes } = await supabase.auth.getSession();
+      token = sessRes.session?.access_token ?? null;
+
+      if (!token) {
+        const { data: refreshed } = await supabase.auth.refreshSession();
+        token = refreshed.session?.access_token ?? null;
+      }
+
+      if (!token) {
+        router.replace("/login");
+        return;
+      }
+
+      // 3) Rolle-sjekk via server (samme gate som resten av systemet)
+      try {
+        const meRes = await fetch("/api/auth/me", {
+          method: "GET",
+          headers: { authorization: `Bearer ${token}` },
+        });
+        const me = await meRes.json().catch(() => null);
+
+        if (!meRes.ok || !me?.ok) {
+          await supabase.auth.signOut();
+          router.replace("/login");
+          return;
+        }
+
+        const role = (String(me.role ?? "kunde") as Role) ?? "kunde";
+        const ok = role === "admin" || role === "innkjøper";
+
+        if (!alive) return;
+
+        setRoleOk(ok);
+
+        if (!ok) {
+          setOrder(null);
+          setItems([]);
+          setLoading(false);
+          return;
+        }
+      } catch {
+        await supabase.auth.signOut();
+        router.replace("/login");
+        return;
+      }
+
+      // 4) Last ordre (bruk maybeSingle + type guard)
       const { data: o, error: oErr } = await supabase
         .from("orders")
         .select(
@@ -146,31 +209,33 @@ export default function PurchasingOrderDetailsPage() {
             "purchaser_note",
           ].join(", ")
         )
-        .eq("id", id)
-        .single();
+        .eq("id", orderId)
+        .maybeSingle();
 
       if (!alive) return;
 
-      if (oErr || !o) {
+      if (oErr || !isOrderRow(o)) {
         console.error(oErr);
         setOrder(null);
         setItems([]);
+        setErrorMsg("Fant ikke ordren (eller du har ikke tilgang).");
         setLoading(false);
         return;
       }
 
-      setOrder(o as OrderRow);
+      setOrder(o);
 
-      setStatus((o as any).status ?? "SUBMITTED");
-      setEta((o as any).expected_delivery_date ?? "");
-      setInfo((o as any).delivery_info ?? "");
-      setConfirmPath((o as any).confirmation_file_path ?? "");
-      setNote((o as any).purchaser_note ?? "");
+      setStatus(o.status ?? "SUBMITTED");
+      setEta(o.expected_delivery_date ?? "");
+      setInfo(o.delivery_info ?? "");
+      setConfirmPath(o.confirmation_file_path ?? "");
+      setNote(o.purchaser_note ?? "");
 
+      // 5) Last ordrelinjer
       const { data: it, error: itErr } = await supabase
         .from("order_items")
         .select("id, product_id, product_no, name, unit_price, qty")
-        .eq("order_id", id)
+        .eq("order_id", orderId)
         .order("product_no", { ascending: true });
 
       if (!alive) return;
@@ -188,19 +253,17 @@ export default function PurchasingOrderDetailsPage() {
     return () => {
       alive = false;
     };
-  }, [params.id, router, supabase]);
+  }, [orderId, router, supabase]);
 
   const total = useMemo(() => {
-    return items.reduce(
-      (sum, x) => sum + safeNumber(x.unit_price) * safeNumber(x.qty),
-      0
-    );
+    return items.reduce((sum, x) => sum + safeNumber(x.unit_price) * safeNumber(x.qty), 0);
   }, [items]);
 
   async function save() {
     if (!order) return;
 
     setSaving(true);
+    setErrorMsg(null);
 
     const { error } = await supabase
       .from("orders")
@@ -241,6 +304,7 @@ export default function PurchasingOrderDetailsPage() {
     if (!uploadFile) return alert("Velg en PDF først.");
 
     setUploading(true);
+    setErrorMsg(null);
 
     const path = makeStoragePath(order.id, uploadFile);
 
@@ -258,11 +322,13 @@ export default function PurchasingOrderDetailsPage() {
       return;
     }
 
+    const nextStatus = status === "SUBMITTED" ? "CONFIRMED" : status;
+
     const { error: dbErr } = await supabase
       .from("orders")
       .update({
         confirmation_file_path: path,
-        status: status === "SUBMITTED" ? "CONFIRMED" : status,
+        status: nextStatus,
       })
       .eq("id", order.id);
 
@@ -275,11 +341,12 @@ export default function PurchasingOrderDetailsPage() {
     }
 
     setConfirmPath(path);
+    setStatus(nextStatus);
+
     setOrder((prev) =>
-      prev ? { ...prev, confirmation_file_path: path } : prev
+      prev ? { ...prev, confirmation_file_path: path, status: nextStatus } : prev
     );
 
-    // valgfritt: nullstill filvelger
     setUploadFile(null);
 
     alert("Ordrebekreftelse lastet opp og lagret.");
@@ -304,8 +371,8 @@ export default function PurchasingOrderDetailsPage() {
           ← Mine ordre
         </button>
         <div className="rounded-xl border p-5 text-sm text-gray-700">
-          Du har ikke innkjøper-tilgang. Rollen må være <b>PURCHASER</b> eller{" "}
-          <b>ADMIN</b>.
+          Du har ikke innkjøper-tilgang. Rollen må være <b>innkjøper</b> eller{" "}
+          <b>admin</b>.
         </div>
       </div>
     );
@@ -321,7 +388,7 @@ export default function PurchasingOrderDetailsPage() {
           ← Tilbake
         </button>
         <div className="rounded-xl border p-5 text-sm text-gray-700">
-          Fant ikke ordren.
+          {errorMsg ?? "Fant ikke ordren."}
         </div>
       </div>
     );
@@ -418,9 +485,7 @@ export default function PurchasingOrderDetailsPage() {
           <div className="text-sm text-gray-800 space-y-1">
             <div className="whitespace-pre-line">{order.delivery_address}</div>
             <div>
-              {[order.delivery_postcode, order.delivery_city]
-                .filter(Boolean)
-                .join(" ")}
+              {[order.delivery_postcode, order.delivery_city].filter(Boolean).join(" ")}
             </div>
           </div>
 
@@ -461,17 +526,13 @@ export default function PurchasingOrderDetailsPage() {
                   const line = safeNumber(x.unit_price) * safeNumber(x.qty);
                   return (
                     <tr key={x.id} className="align-top">
-                      <td className="border-b py-2 pr-3 font-medium">
-                        {x.product_no}
-                      </td>
+                      <td className="border-b py-2 pr-3 font-medium">{x.product_no}</td>
                       <td className="border-b py-2 pr-3">{x.name}</td>
                       <td className="border-b py-2 pr-3 text-right">{x.qty}</td>
                       <td className="border-b py-2 pr-3 text-right">
                         {formatNok(safeNumber(x.unit_price))}
                       </td>
-                      <td className="border-b py-2 text-right">
-                        {formatNok(line)}
-                      </td>
+                      <td className="border-b py-2 text-right">{formatNok(line)}</td>
                     </tr>
                   );
                 })}
@@ -481,9 +542,7 @@ export default function PurchasingOrderDetailsPage() {
                   <td colSpan={4} className="pt-3 text-right font-semibold">
                     Total
                   </td>
-                  <td className="pt-3 text-right font-semibold">
-                    {formatNok(total)}
-                  </td>
+                  <td className="pt-3 text-right font-semibold">{formatNok(total)}</td>
                 </tr>
               </tfoot>
             </table>
@@ -559,8 +618,7 @@ export default function PurchasingOrderDetailsPage() {
           </div>
 
           <div className="text-xs text-gray-600">
-            PDF lagres i Supabase Storage (privat). Neste steg: bestiller laster
-            ned via signed link.
+            PDF lagres i Supabase Storage (privat). Neste steg: bestiller laster ned via signed link.
           </div>
         </div>
 

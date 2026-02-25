@@ -80,24 +80,22 @@ function daysUntil(iso: string | null) {
   today.setHours(0, 0, 0, 0);
   d.setHours(0, 0, 0, 0);
 
-  return Math.round(
-    (d.getTime() - today.getTime()) / (1000 * 60 * 60 * 24)
-  );
+  return Math.round((d.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
 }
 
 function statusTone(status: string) {
   const s = String(status ?? "").toUpperCase();
 
-  if (["DELIVERED"].includes(s)) return "border-green-300 text-green-800 bg-green-50";
-  if (["CANCELLED"].includes(s)) return "border-red-300 text-red-800 bg-red-50";
+  if (s === "DELIVERED") return "border-green-200 bg-green-50 text-green-800";
+  if (s === "CANCELLED") return "border-red-200 bg-red-50 text-red-800";
 
   if (["SUBMITTED", "IN_REVIEW", "ORDERED"].includes(s))
-    return "border-amber-300 text-amber-800 bg-amber-50";
+    return "border-amber-200 bg-amber-50 text-amber-800";
 
   if (["CONFIRMED", "SHIPPING"].includes(s))
-    return "border-blue-300 text-blue-800 bg-blue-50";
+    return "border-blue-200 bg-blue-50 text-blue-800";
 
-  return "border-gray-300 text-gray-800 bg-gray-50";
+  return "border-gray-200 bg-gray-50 text-gray-800";
 }
 
 function formatNok(value: number) {
@@ -144,10 +142,10 @@ export default function OrderDetailsPage() {
 
   const [downloading, setDownloading] = useState(false);
   const [deleting, setDeleting] = useState(false);
-
   const [toast, setToast] = useState<string | null>(null);
 
   const isAdmin = myRole === "admin";
+  const orderId = params?.id;
 
   useEffect(() => {
     let alive = true;
@@ -156,6 +154,14 @@ export default function OrderDetailsPage() {
       setLoading(true);
       setErrorMsg(null);
 
+      if (!orderId) {
+        setOrder(null);
+        setItems([]);
+        setErrorMsg("Mangler ordre-id i URL.");
+        setLoading(false);
+        return;
+      }
+
       // 1) Må være logget inn
       const { data: auth } = await supabase.auth.getUser();
       if (!auth.user) {
@@ -163,9 +169,16 @@ export default function OrderDetailsPage() {
         return;
       }
 
-      // 2) Token
-      const { data: sess } = await supabase.auth.getSession();
-      const token = sess.session?.access_token;
+      // 2) Token (refresh hvis nødvendig)
+      let token: string | null = null;
+      const { data: sessRes } = await supabase.auth.getSession();
+      token = sessRes.session?.access_token ?? null;
+
+      if (!token) {
+        const { data: refreshed } = await supabase.auth.refreshSession();
+        token = refreshed.session?.access_token ?? null;
+      }
+
       if (!token) {
         router.replace("/login");
         return;
@@ -177,6 +190,7 @@ export default function OrderDetailsPage() {
           method: "GET",
           headers: { authorization: `Bearer ${token}` },
         });
+
         const me = await meRes.json().catch(() => null);
 
         if (!meRes.ok || !me?.ok) {
@@ -195,8 +209,6 @@ export default function OrderDetailsPage() {
         router.replace("/login");
         return;
       }
-
-      const id = params.id;
 
       // 4) Last ordre
       const { data: o, error: oErr } = await supabase
@@ -220,7 +232,7 @@ export default function OrderDetailsPage() {
             "confirmation_file_path",
           ].join(", ")
         )
-        .eq("id", id)
+        .eq("id", orderId)
         .maybeSingle();
 
       if (!alive) return;
@@ -240,7 +252,7 @@ export default function OrderDetailsPage() {
       const { data: it, error: itErr } = await supabase
         .from("order_items")
         .select("id, product_id, product_no, name, unit_price, qty")
-        .eq("order_id", id)
+        .eq("order_id", orderId)
         .order("product_no", { ascending: true });
 
       if (!alive) return;
@@ -258,35 +270,34 @@ export default function OrderDetailsPage() {
     return () => {
       alive = false;
     };
-  }, [params.id, router, supabase]);
+  }, [orderId, router, supabase]);
 
   const total = useMemo(() => {
-    return items.reduce(
-      (sum, x) => sum + safeNumber(x.unit_price) * safeNumber(x.qty),
-      0
-    );
+    return items.reduce((sum, x) => sum + safeNumber(x.unit_price) * safeNumber(x.qty), 0);
   }, [items]);
 
   async function openConfirmation() {
-    if (!order?.confirmation_file_path) return;
+    if (!order?.confirmation_file_path || !orderId) return;
 
     setDownloading(true);
     try {
-      const { data: sessionRes, error: sessErr } =
-        await supabase.auth.getSession();
-      const token = sessionRes.session?.access_token;
+      const { data: sessionRes } = await supabase.auth.getSession();
+      let token = sessionRes.session?.access_token ?? null;
 
-      if (sessErr || !token) {
+      if (!token) {
+        const { data: refreshed } = await supabase.auth.refreshSession();
+        token = refreshed.session?.access_token ?? null;
+      }
+
+      if (!token) {
         alert("Du er ikke innlogget.");
         router.replace("/login");
         return;
       }
 
-      const res = await fetch(`/api/orders/${params.id}/confirmation-url`, {
+      const res = await fetch(`/api/orders/${orderId}/confirmation-url`, {
         method: "GET",
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
+        headers: { authorization: `Bearer ${token}` },
       });
 
       if (!res.ok) {
@@ -310,7 +321,12 @@ export default function OrderDetailsPage() {
     setDeleting(true);
     try {
       const { data: sessionRes } = await supabase.auth.getSession();
-      const token = sessionRes.session?.access_token;
+      let token = sessionRes.session?.access_token ?? null;
+
+      if (!token) {
+        const { data: refreshed } = await supabase.auth.refreshSession();
+        token = refreshed.session?.access_token ?? null;
+      }
 
       if (!token) {
         router.replace("/login");
@@ -319,9 +335,7 @@ export default function OrderDetailsPage() {
 
       const res = await fetch(`/api/admin/orders/${order.id}`, {
         method: "DELETE",
-        headers: {
-          authorization: `Bearer ${token}`,
-        },
+        headers: { authorization: `Bearer ${token}` },
       });
 
       const data = await res.json().catch(() => null);
@@ -365,6 +379,8 @@ export default function OrderDetailsPage() {
     );
   }
 
+  const diff = order.expected_delivery_date ? daysUntil(order.expected_delivery_date) : null;
+
   return (
     <div className="p-6 space-y-6">
       {/* Top navigation */}
@@ -396,17 +412,13 @@ export default function OrderDetailsPage() {
       <div className="rounded-2xl border bg-white p-5 shadow-sm">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="space-y-1">
-            <div className="text-sm text-gray-600">
-              Opprettet: {formatDateTime(order.created_at)}
-            </div>
+            <div className="text-sm text-gray-600">Opprettet: {formatDateTime(order.created_at)}</div>
 
             <div className="text-lg font-semibold">{order.project_name}</div>
 
-            {order.project_no && (
-              <div className="text-sm text-gray-600">
-                Prosjekt nr: {order.project_no}
-              </div>
-            )}
+            {order.project_no ? (
+              <div className="text-sm text-gray-600">Prosjekt nr: {order.project_no}</div>
+            ) : null}
 
             <div
               className={cn(
@@ -417,48 +429,37 @@ export default function OrderDetailsPage() {
               <span className="font-medium">{statusLabel(order.status)}</span>
             </div>
 
-            {order.expected_delivery_date &&
-              (() => {
-                const diff = daysUntil(order.expected_delivery_date);
+            {order.expected_delivery_date ? (
+              <div className="mt-2 text-sm text-gray-700 space-y-1">
+                <div>
+                  Forventet levering:{" "}
+                  <span className="font-medium">{formatDateOnly(order.expected_delivery_date)}</span>
+                </div>
 
-                return (
-                  <div className="mt-2 text-sm text-gray-700 space-y-1">
-                    <div>
-                      Forventet levering:{" "}
-                      <span className="font-medium">
-                        {formatDateOnly(order.expected_delivery_date)}
-                      </span>
-                    </div>
-
-                    {typeof diff === "number" && (
-                      <div
-                        className={cn(
-                          "text-xs font-medium",
-                          diff < 0
-                            ? "text-red-700"
-                            : diff <= 3
-                            ? "text-amber-700"
-                            : "text-gray-600"
-                        )}
-                      >
-                        {diff < 0
-                          ? `${Math.abs(diff)} dager forsinket`
-                          : diff === 0
-                          ? "Levering i dag"
-                          : `${diff} dager til levering`}
-                      </div>
+                {typeof diff === "number" ? (
+                  <div
+                    className={cn(
+                      "text-xs font-medium",
+                      diff < 0 ? "text-red-700" : diff <= 3 ? "text-amber-700" : "text-gray-600"
                     )}
+                  >
+                    {diff < 0
+                      ? `${Math.abs(diff)} dager forsinket`
+                      : diff === 0
+                      ? "Levering i dag"
+                      : `${diff} dager til levering`}
                   </div>
-                );
-              })()}
+                ) : null}
+              </div>
+            ) : null}
 
-            {order.delivery_info && (
+            {order.delivery_info ? (
               <div className="mt-3 rounded-xl border bg-gray-50 p-3 text-sm text-gray-700 whitespace-pre-line">
                 {order.delivery_info}
               </div>
-            )}
+            ) : null}
 
-            {(myUsername || myEmail) ? (
+            {myUsername || myEmail ? (
               <div className="mt-3 text-xs text-gray-500">
                 {myUsername ?? myEmail} · {myRole}
               </div>
@@ -484,15 +485,10 @@ export default function OrderDetailsPage() {
               Sum: <span className="font-semibold">{formatNok(total)}</span>
             </div>
 
-            {/* Slett-ordre: kun admin */}
             {isAdmin ? (
               <button
                 disabled={deleting}
-                className={cn(
-                  "rounded-lg border px-4 py-2 text-sm",
-                  "hover:bg-gray-50",
-                  "disabled:opacity-50"
-                )}
+                className={cn("rounded-lg border px-4 py-2 text-sm hover:bg-gray-50", "disabled:opacity-50")}
                 onClick={deleteOrder}
                 title="Slett ordre"
               >
@@ -500,9 +496,7 @@ export default function OrderDetailsPage() {
               </button>
             ) : null}
 
-            {toast ? (
-              <div className="text-xs text-green-700">{toast}</div>
-            ) : null}
+            {toast ? <div className="text-xs text-green-700">{toast}</div> : null}
           </div>
         </div>
       </div>
@@ -516,18 +510,16 @@ export default function OrderDetailsPage() {
               <span className="text-gray-600">Navn:</span>{" "}
               <span className="font-medium">{order.contact_name}</span>
             </div>
-            {order.contact_phone && (
+            {order.contact_phone ? (
               <div>
-                <span className="text-gray-600">Telefon:</span>{" "}
-                {order.contact_phone}
+                <span className="text-gray-600">Telefon:</span> {order.contact_phone}
               </div>
-            )}
-            {order.contact_email && (
+            ) : null}
+            {order.contact_email ? (
               <div>
-                <span className="text-gray-600">E-post:</span>{" "}
-                {order.contact_email}
+                <span className="text-gray-600">E-post:</span> {order.contact_email}
               </div>
-            )}
+            ) : null}
           </div>
         </section>
 
@@ -536,23 +528,19 @@ export default function OrderDetailsPage() {
           <div className="text-sm text-gray-800 space-y-1">
             <div className="whitespace-pre-line">{order.delivery_address}</div>
             <div>
-              {[order.delivery_postcode, order.delivery_city]
-                .filter(Boolean)
-                .join(" ")}
+              {[order.delivery_postcode, order.delivery_city].filter(Boolean).join(" ")}
             </div>
           </div>
         </section>
       </div>
 
       {/* Comment */}
-      {order.comment && (
+      {order.comment ? (
         <section className="rounded-2xl border bg-white p-5 shadow-sm space-y-2">
           <h2 className="font-semibold">Kommentar</h2>
-          <p className="text-sm text-gray-800 whitespace-pre-line">
-            {order.comment}
-          </p>
+          <p className="text-sm text-gray-800 whitespace-pre-line">{order.comment}</p>
         </section>
-      )}
+      ) : null}
 
       {/* Order lines */}
       <section className="rounded-2xl border bg-white p-5 shadow-sm space-y-3">
@@ -582,17 +570,13 @@ export default function OrderDetailsPage() {
                   const line = safeNumber(x.unit_price) * safeNumber(x.qty);
                   return (
                     <tr key={x.id} className="align-top">
-                      <td className="border-b py-2 pr-3 font-medium">
-                        {x.product_no}
-                      </td>
+                      <td className="border-b py-2 pr-3 font-medium">{x.product_no}</td>
                       <td className="border-b py-2 pr-3">{x.name}</td>
                       <td className="border-b py-2 pr-3 text-right">{x.qty}</td>
                       <td className="border-b py-2 pr-3 text-right">
                         {formatNok(safeNumber(x.unit_price))}
                       </td>
-                      <td className="border-b py-2 text-right">
-                        {formatNok(line)}
-                      </td>
+                      <td className="border-b py-2 text-right">{formatNok(line)}</td>
                     </tr>
                   );
                 })}
@@ -602,9 +586,7 @@ export default function OrderDetailsPage() {
                   <td colSpan={4} className="pt-3 text-right font-semibold">
                     Total
                   </td>
-                  <td className="pt-3 text-right font-semibold">
-                    {formatNok(total)}
-                  </td>
+                  <td className="pt-3 text-right font-semibold">{formatNok(total)}</td>
                 </tr>
               </tfoot>
             </table>

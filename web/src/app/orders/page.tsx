@@ -4,6 +4,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabaseBrowser } from "@/lib/supabase/browser";
+import { useRequireMe } from "@/lib/useRequireMe";
 
 type Role = "kunde" | "admin" | "innkjøper";
 
@@ -11,13 +12,15 @@ type OrderRow = {
   id: string;
   created_at: string;
   status: string;
+
   project_name: string;
   project_no: string | null;
+
   expected_delivery_date: string | null;
   delivery_info: string | null;
   confirmation_file_path: string | null;
 
-  // nye (anbefalt i DB)
+  // kan mangle i DB
   updated_at?: string | null;
   updated_by_name?: string | null;
 };
@@ -44,12 +47,11 @@ function formatDateTime(value: string) {
 function formatDateOnly(value: string | null | undefined) {
   if (!value) return "";
   const d = new Date(value);
-  if (!Number.isFinite(d.getTime())) return value;
+  if (!Number.isFinite(d.getTime())) return String(value);
 
   const day = String(d.getDate()).padStart(2, "0");
   const month = String(d.getMonth() + 1).padStart(2, "0");
   const year = d.getFullYear();
-
   return `${day}.${month}.${year}`;
 }
 
@@ -78,19 +80,25 @@ function isEtaSoon(eta: string | null, days: number) {
   return diffDays >= 0 && diffDays <= days;
 }
 
+function etaCounterText(eta: string | null) {
+  const d = safeDate(eta ?? null);
+  if (!d) return null;
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  d.setHours(0, 0, 0, 0);
+
+  const diffDays = Math.round((d.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+  if (diffDays > 0) return `${diffDays} dager igjen`;
+  if (diffDays === 0) return "i dag";
+  return `${Math.abs(diffDays)} dager over`;
+}
+
 function statusTone(status: string): "green" | "yellow" | "red" | "neutral" {
   const s = String(status ?? "").toUpperCase();
-
-  // grønn: ferdige/trygge
   if (s === "DELIVERED" || s === "CONFIRMED") return "green";
-
-  // gul: i arbeid / underveis
-  if (s === "SUBMITTED" || s === "IN_REVIEW" || s === "ORDERED" || s === "SHIPPING")
-    return "yellow";
-
-  // rød: avbrutt/problemer
+  if (s === "SUBMITTED" || s === "IN_REVIEW" || s === "ORDERED" || s === "SHIPPING") return "yellow";
   if (s === "CANCELLED") return "red";
-
   return "neutral";
 }
 
@@ -106,122 +114,94 @@ function looksLikeMissingColumn(err: any, col: string) {
   return msg.includes("does not exist") && msg.includes(col.toLowerCase());
 }
 
-function etaCounterText(eta: string | null) {
-  const d = safeDate(eta ?? null);
-  if (!d) return null;
-
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  d.setHours(0, 0, 0, 0);
-
-  const diffDays = Math.round(
-    (d.getTime() - today.getTime()) / (1000 * 60 * 60 * 24)
-  );
-
-  if (diffDays > 0) return `${diffDays} dager igjen`;
-  if (diffDays === 0) return "i dag";
-  return `${Math.abs(diffDays)} dager over`;
-}
-
 export default function OrdersPage() {
   const router = useRouter();
   const supabase = useMemo(() => supabaseBrowser(), []);
 
+  // ✅ invite-only + rolle fra server
+  const { me, loading: meLoading } = useRequireMe();
+
   const [rows, setRows] = useState<OrderRow[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const [myEmail, setMyEmail] = useState<string>("");
-  const [myName, setMyName] = useState<string>("");
-  const [myRole, setMyRole] = useState<Role>("kunde");
-
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+
   const [err, setErr] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
+  const myEmail = me?.email ? String(me.email).toLowerCase() : "";
+  const myRole: Role = (me?.role as Role) ?? "kunde";
+  const myName = (me?.display_name ? String(me.display_name).trim() : "") || myEmail;
+
   const isAdmin = myRole === "admin";
+
+  async function getFreshToken() {
+    const { data: sessRes, error: sessErr } = await supabase.auth.getSession();
+    if (sessErr) console.error(sessErr);
+
+    let token = sessRes.session?.access_token ?? null;
+
+    if (!token) {
+      const { data: refreshed, error: refreshErr } = await supabase.auth.refreshSession();
+      if (refreshErr) console.error(refreshErr);
+      token = refreshed.session?.access_token ?? null;
+    }
+
+    return token;
+  }
 
   useEffect(() => {
     let alive = true;
 
     (async () => {
+      if (meLoading) return;
+
+      if (!me?.ok) {
+        setLoading(false);
+        return;
+      }
+
       setLoading(true);
       setErr(null);
 
-      // 1) Må være innlogget
-      const { data: userRes } = await supabase.auth.getUser();
-      if (!userRes.user) {
-        router.replace("/login");
-        return;
-      }
-
-      // 2) Token
-      const { data: sess } = await supabase.auth.getSession();
-      const token = sess.session?.access_token;
-      if (!token) {
-        router.replace("/login");
-        return;
-      }
-
-      // 3) Hent rolle + display_name fra server
-      try {
-        const meRes = await fetch("/api/auth/me", {
-          method: "GET",
-          headers: { authorization: `Bearer ${token}` },
-        });
-        const me = await meRes.json().catch(() => null);
-
-        if (!meRes.ok || !me?.ok) {
-          await supabase.auth.signOut();
-          router.replace("/login");
-          return;
-        }
-
-        if (!alive) return;
-
-        const email = String(me.email ?? "").toLowerCase();
-        const displayName = String(me.display_name ?? "").trim();
-
-        setMyEmail(email);
-        setMyName(displayName || email);
-        setMyRole((String(me.role ?? "kunde") as Role) ?? "kunde");
-      } catch {
-        await supabase.auth.signOut();
-        router.replace("/login");
-        return;
-      }
-
-      // 4) Last ordre (prøv med updated_*)
       const selectWithUpdated =
         "id, created_at, status, project_name, project_no, expected_delivery_date, delivery_info, confirmation_file_path, updated_at, updated_by_name";
 
       const selectBase =
         "id, created_at, status, project_name, project_no, expected_delivery_date, delivery_info, confirmation_file_path";
 
-      let res = await supabase
+      // ✅ Kall 1
+      const r1 = await supabase
         .from("orders")
         .select(selectWithUpdated)
         .order("created_at", { ascending: false });
 
+      let data: unknown[] | null = (r1.data as unknown[]) ?? null;
+      let error: any = r1.error;
+
+      // ✅ fallback hvis kolonner ikke finnes
       if (
-        res.error &&
-        (looksLikeMissingColumn(res.error, "updated_at") ||
-          looksLikeMissingColumn(res.error, "updated_by_name"))
+        error &&
+        (looksLikeMissingColumn(error, "updated_at") || looksLikeMissingColumn(error, "updated_by_name"))
       ) {
-        res = await supabase
+        const r2 = await supabase
           .from("orders")
           .select(selectBase)
           .order("created_at", { ascending: false });
+
+        data = (r2.data as unknown[]) ?? null;
+        error = r2.error;
       }
 
       if (!alive) return;
 
-      if (res.error) {
-        console.error(res.error);
-        setErr(res.error.message);
+      if (error) {
+        console.error(error);
+        setErr(String(error.message ?? "Ukjent feil"));
         setRows([]);
       } else {
-        setRows((res.data ?? []) as OrderRow[]);
+        setRows((data ?? []) as OrderRow[]);
       }
 
       setLoading(false);
@@ -230,10 +210,9 @@ export default function OrdersPage() {
     return () => {
       alive = false;
     };
-  }, [router, supabase]);
+  }, [meLoading, me?.ok, supabase]);
 
   const sorted = useMemo(() => {
-    // “Sist oppdatert øverst”: bruk updated_at hvis finnes, ellers created_at
     const list = [...rows];
     list.sort((a, b) => {
       const ta = new Date(a.updated_at ?? a.created_at).getTime();
@@ -248,27 +227,24 @@ export default function OrdersPage() {
     setErr(null);
 
     try {
-      const { data: sessionRes, error: sessErr } = await supabase.auth.getSession();
-      const token = sessionRes.session?.access_token;
-
-      if (sessErr || !token) {
-        alert("Du er ikke innlogget.");
+      const token = await getFreshToken();
+      if (!token) {
         router.replace("/login");
         return;
       }
 
       const res = await fetch(`/api/orders/${orderId}/confirmation-url`, {
         method: "GET",
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { authorization: `Bearer ${token}` },
       });
 
-      if (!res.ok) {
-        alert("Kunne ikke hente nedlastingslenke.");
+      const payload = await res.json().catch(() => null);
+      if (!res.ok || !payload?.url) {
+        alert(payload?.error ?? "Kunne ikke hente nedlastingslenke.");
         return;
       }
 
-      const { url } = (await res.json()) as { url: string };
-      window.open(url, "_blank", "noopener,noreferrer");
+      window.open(payload.url, "_blank", "noopener,noreferrer");
     } finally {
       setDownloadingId(null);
     }
@@ -284,8 +260,7 @@ export default function OrdersPage() {
     setErr(null);
 
     try {
-      const { data: sessionRes } = await supabase.auth.getSession();
-      const token = sessionRes.session?.access_token;
+      const token = await getFreshToken();
       if (!token) {
         router.replace("/login");
         return;
@@ -304,13 +279,13 @@ export default function OrdersPage() {
 
       setRows((prev) => prev.filter((x) => x.id !== orderId));
       setToast("Ordre slettet");
-      setTimeout(() => setToast(null), 1200);
+      window.setTimeout(() => setToast(null), 1200);
     } finally {
       setDeletingId(null);
     }
   }
 
-  if (loading) {
+  if (meLoading || loading) {
     return (
       <div className="p-6">
         <h1 className="text-xl font-semibold">Mine bestillinger</h1>
@@ -319,13 +294,21 @@ export default function OrdersPage() {
     );
   }
 
+  if (!me?.ok) {
+    return (
+      <div className="p-6 space-y-3">
+        <div className="rounded-2xl border p-5 text-sm text-gray-700">Du har ikke tilgang.</div>
+        <button className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50" onClick={() => router.push("/login")}>
+          Til innlogging
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div className="p-6 space-y-5">
       <header className="flex flex-wrap items-center justify-between gap-3">
-        <button
-          className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50"
-          onClick={() => router.push("/products")}
-        >
+        <button className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50" onClick={() => router.push("/products")}>
           ← Produkter
         </button>
 
@@ -338,23 +321,14 @@ export default function OrdersPage() {
 
       <div className="space-y-1">
         <h1 className="text-xl font-semibold">Mine bestillinger</h1>
-        <p className="text-sm text-gray-600">
-          Status, ETA og ordrebekreftelse – sortert etter sist oppdatert.
-        </p>
+        <p className="text-sm text-gray-600">Status, ETA og ordrebekreftelse – sortert etter sist oppdatert.</p>
       </div>
 
-      {err ? (
-        <div className="rounded-xl border bg-white px-4 py-3 text-sm text-red-700">{err}</div>
-      ) : null}
-
-      {toast ? (
-        <div className="rounded-xl border bg-white px-4 py-3 text-sm text-green-700">{toast}</div>
-      ) : null}
+      {err ? <div className="rounded-xl border bg-white px-4 py-3 text-sm text-red-700">{err}</div> : null}
+      {toast ? <div className="rounded-xl border bg-white px-4 py-3 text-sm text-green-700">{toast}</div> : null}
 
       {sorted.length === 0 ? (
-        <div className="rounded-2xl border p-6 text-sm text-gray-600">
-          Du har ingen bestillinger ennå.
-        </div>
+        <div className="rounded-2xl border p-6 text-sm text-gray-600">Du har ingen bestillinger ennå.</div>
       ) : (
         <div className="space-y-3">
           {sorted.map((o) => {
@@ -372,64 +346,51 @@ export default function OrdersPage() {
               <div key={o.id} className="rounded-2xl border bg-white p-5 shadow-sm">
                 <div className="flex flex-wrap items-start justify-between gap-4">
                   <div className="space-y-1">
-                    <div className="text-sm text-gray-600">
-                      Opprettet: {formatDateTime(o.created_at)}
-                    </div>
+                    <div className="text-sm text-gray-600">Opprettet: {formatDateTime(o.created_at)}</div>
 
                     <div className="text-sm text-gray-600">
-                      Sist endret:{" "}
-                      <span className="font-medium text-gray-900">{formatDateTime(lastTs)}</span>
-                      {o.updated_by_name ? (
-                        <span className="text-gray-500"> · {o.updated_by_name}</span>
-                      ) : null}
+                      Sist endret: <span className="font-medium text-gray-900">{formatDateTime(lastTs)}</span>
+                      {o.updated_by_name ? <span className="text-gray-500"> · {o.updated_by_name}</span> : null}
                     </div>
 
                     <div className="font-semibold">{o.project_name}</div>
 
-                    {o.project_no ? (
-                      <div className="text-sm text-gray-600">Prosjekt nr: {o.project_no}</div>
-                    ) : null}
+                    {o.project_no ? <div className="text-sm text-gray-600">Prosjekt nr: {o.project_no}</div> : null}
                   </div>
 
                   <div className="flex flex-col items-end gap-2">
-                    <div
-                      className={cn(
-                        "rounded-full border px-3 py-1 text-sm",
-                        badgeClass(tone)
-                      )}
-                    >
+                    <div className={cn("rounded-full border px-3 py-1 text-sm", badgeClass(tone))}>
                       <span className="font-medium">{statusLabel(o.status)}</span>
                     </div>
 
-                    <div className="text-sm text-gray-700">
-  ETA:{" "}
-  {o.expected_delivery_date ? (
-    <span
-      className={cn(
-        "font-medium",
-        etaOverdue ? "text-red-700" : etaSoon ? "text-amber-700" : "text-gray-900"
-      )}
-    >
-      {formatDateOnly(o.expected_delivery_date)}</span>
-  ) : (
-    <span className="text-gray-500">Ikke satt</span>
-  )}
+                    <div className="text-sm text-gray-700 text-right">
+                      <div>
+                        ETA:{" "}
+                        {o.expected_delivery_date ? (
+                          <span
+                            className={cn(
+                              "font-medium",
+                              etaOverdue ? "text-red-700" : etaSoon ? "text-amber-700" : "text-gray-900"
+                            )}
+                          >
+                            {formatDateOnly(o.expected_delivery_date)}
+                          </span>
+                        ) : (
+                          <span className="text-gray-500">Ikke satt</span>
+                        )}
+                      </div>
 
-  {o.expected_delivery_date ? (
-    <div
-      className={cn(
-        "text-xs mt-0.5",
-        etaOverdue
-          ? "text-red-600"
-          : etaSoon
-          ? "text-amber-600"
-          : "text-gray-500"
-      )}
-    >
-      {etaCounterText(o.expected_delivery_date)}
-    </div>
-  ) : null}
-</div>
+                      {o.expected_delivery_date ? (
+                        <div
+                          className={cn(
+                            "text-xs mt-0.5",
+                            etaOverdue ? "text-red-600" : etaSoon ? "text-amber-600" : "text-gray-500"
+                          )}
+                        >
+                          {etaCounterText(o.expected_delivery_date)}
+                        </div>
+                      ) : null}
+                    </div>
                   </div>
                 </div>
 
@@ -440,10 +401,7 @@ export default function OrdersPage() {
                 ) : null}
 
                 <div className="mt-4 flex flex-wrap items-center gap-2">
-                  <button
-                    className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50"
-                    onClick={() => router.push(`/orders/${o.id}`)}
-                  >
+                  <button className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50" onClick={() => router.push(`/orders/${o.id}`)}>
                     Åpne ordre
                   </button>
 
@@ -456,9 +414,7 @@ export default function OrdersPage() {
                       {busyDownload ? "Henter lenke…" : "Last ned ordrebekreftelse"}
                     </button>
                   ) : (
-                    <div className="text-sm text-gray-500">
-                      Ordrebekreftelse ikke tilgjengelig enda
-                    </div>
+                    <div className="text-sm text-gray-500">Ordrebekreftelse ikke tilgjengelig enda</div>
                   )}
 
                   {isAdmin ? (

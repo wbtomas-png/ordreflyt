@@ -11,23 +11,28 @@ type OrderRow = {
   id: string;
   created_at: string;
   status: string;
+
   project_name: string;
   project_no: string | null;
+
   contact_name: string;
   contact_phone: string | null;
   contact_email: string | null;
+
   delivery_address: string;
   delivery_postcode: string | null;
   delivery_city: string | null;
+
   comment: string | null;
 
   expected_delivery_date: string | null;
   delivery_info: string | null;
   confirmation_file_path: string | null;
+
   purchaser_note: string | null;
 
   updated_at?: string | null;
-  updated_by_name?: string | null; // <- bruker display_name her
+  updated_by_name?: string | null; // display_name
 };
 
 type OrderAuditRow = {
@@ -35,7 +40,7 @@ type OrderAuditRow = {
   order_id: string;
   created_at: string;
   actor_name?: string | null;
-  actor_email?: string | null; // fallback hvis du vil beholde det
+  actor_email?: string | null;
   action: string;
   diff: any;
 };
@@ -106,13 +111,12 @@ function isEtaSoon(eta: string | null, days: number) {
   return diffDays >= 0 && diffDays <= days;
 }
 
-function normEmail(s: string) {
+function normEmail(s: unknown) {
   return String(s ?? "").trim().toLowerCase();
 }
 
 function normName(s: unknown) {
-  const v = String(s ?? "").trim();
-  return v;
+  return String(s ?? "").trim();
 }
 
 function looksLikeMissingColumn(err: any, col: string) {
@@ -121,7 +125,6 @@ function looksLikeMissingColumn(err: any, col: string) {
 }
 
 async function loadOrders(supabase: ReturnType<typeof supabaseBrowser>) {
-  // prøv med updated_at + updated_by_name
   const withUpdated = [
     "id",
     "created_at",
@@ -189,18 +192,17 @@ export default function PurchasingPage() {
   const [loading, setLoading] = useState(true);
 
   const [myEmail, setMyEmail] = useState("");
-  const [myName, setMyName] = useState(""); // <- display_name
+  const [myName, setMyName] = useState("");
   const [myRole, setMyRole] = useState<Role>("kunde");
+
   const roleOk = myRole === "admin" || myRole === "innkjøper";
 
-  // filter + arbeidskø
   const [q, setQ] = useState("");
   const [statusFilter, setStatusFilter] = useState<
     (typeof STATUSES)[number] | "ALL"
   >("ALL");
   const [queueMode, setQueueMode] = useState<"OPEN" | "ALL">("OPEN");
 
-  // audit preview
   const [auditByOrderId, setAuditByOrderId] = useState<
     Record<string, OrderAuditRow[]>
   >({});
@@ -245,11 +247,11 @@ export default function PurchasingPage() {
 
         if (!alive) return;
 
-        const email = normEmail(me.email ?? "");
-        const displayName = normName(me.display_name ?? "");
+        const email = normEmail(me.email);
+        const displayName = normName(me.display_name);
 
         setMyEmail(email);
-        setMyName(displayName || email); // fallback til e-post
+        setMyName(displayName || email);
         setMyRole((String(me.role ?? "kunde") as Role) ?? "kunde");
       } catch {
         await supabase.auth.signOut();
@@ -257,7 +259,7 @@ export default function PurchasingPage() {
         return;
       }
 
-      const { data: r, error } = await loadOrders(supabase);
+      const { data, error } = await loadOrders(supabase);
 
       if (!alive) return;
 
@@ -265,10 +267,31 @@ export default function PurchasingPage() {
         console.error(error);
         setErr(error.message);
         setRows([]);
-      } else {
-        setRows((r ?? []) as OrderRow[]);
+        setLoading(false);
+        return;
       }
 
+            const rawUnknown = (data ?? []) as unknown[];
+
+      const cleaned: OrderRow[] = Array.isArray(rawUnknown)
+        ? rawUnknown
+            .filter((x) => {
+              if (!x || typeof x !== "object") return false;
+              const o = x as any;
+              return (
+                typeof o.id === "string" &&
+                typeof o.created_at === "string" &&
+                typeof o.status === "string" &&
+                typeof o.project_name === "string" &&
+                typeof o.contact_name === "string" &&
+                typeof o.delivery_address === "string"
+              );
+            })
+            .map((x) => x as OrderRow)
+        : [];
+
+      setRows(cleaned);
+      setRows(cleaned);
       setLoading(false);
     })();
 
@@ -328,12 +351,15 @@ export default function PurchasingPage() {
     return list;
   }, [rows, q, statusFilter, queueMode]);
 
-  async function updateOrder(id: string, patch: Partial<OrderRow>, before?: OrderRow) {
+  async function updateOrder(
+    id: string,
+    patch: Partial<OrderRow>,
+    before?: OrderRow
+  ) {
     setErr(null);
 
     const nowIso = new Date().toISOString();
 
-    // forsøk å skrive updated_at + updated_by_name
     const payloadWithUpdated: any = {
       status: patch.status,
       expected_delivery_date: patch.expected_delivery_date,
@@ -346,7 +372,6 @@ export default function PurchasingPage() {
 
     let upd = await supabase.from("orders").update(payloadWithUpdated).eq("id", id);
 
-    // fallback hvis kolonnene ikke finnes
     if (
       upd.error &&
       (looksLikeMissingColumn(upd.error, "updated_at") ||
@@ -367,7 +392,7 @@ export default function PurchasingPage() {
       return;
     }
 
-    // audit: best effort (om tabellen/kolonnene ikke finnes, ignorer)
+    // audit (best effort)
     try {
       const diff: Record<string, { from: any; to: any }> = {};
       const keys: Array<keyof OrderRow> = [
@@ -387,16 +412,14 @@ export default function PurchasingPage() {
       }
 
       if (Object.keys(diff).length > 0) {
-        // prøv med actor_name først
         let ins = await supabase.from("order_audit").insert({
           order_id: id,
           actor_name: myName || null,
-          actor_email: myEmail || null, // valgfritt
+          actor_email: myEmail || null,
           action: "UPDATE",
           diff,
         } as any);
 
-        // fallback hvis actor_name ikke finnes
         if (ins.error && looksLikeMissingColumn(ins.error, "actor_name")) {
           await supabase.from("order_audit").insert({
             order_id: id,
@@ -422,51 +445,67 @@ export default function PurchasingPage() {
     setTimeout(() => setToast(null), 1000);
   }
 
-  async function loadAudit(orderId: string) {
+    async function loadAudit(orderId: string) {
     setErr(null);
     setAuditBusyId(orderId);
 
     try {
-      // prøv med actor_name først
-      let res = await supabase
+      // Forsøk 1: med actor_name
+      const resWithName = await supabase
         .from("order_audit")
         .select("id, order_id, created_at, actor_name, actor_email, action, diff")
         .eq("order_id", orderId)
         .order("created_at", { ascending: false })
         .limit(5);
 
-      // fallback hvis actor_name ikke finnes
-      if (res.error && looksLikeMissingColumn(res.error, "actor_name")) {
-        res = await supabase
+      // Hvis OK -> bruk den
+      if (!resWithName.error) {
+        setAuditByOrderId((prev) => ({
+          ...prev,
+          [orderId]: (resWithName.data ?? []) as any,
+        }));
+        return;
+      }
+
+      // Hvis feilen skyldes manglende kolonne -> fallback uten actor_name
+      if (looksLikeMissingColumn(resWithName.error, "actor_name")) {
+        const resNoName = await supabase
           .from("order_audit")
           .select("id, order_id, created_at, actor_email, action, diff")
           .eq("order_id", orderId)
           .order("created_at", { ascending: false })
           .limit(5);
-      }
 
-      if (res.error) {
-        const msg = String(res.error.message ?? "");
-        if (msg.toLowerCase().includes("does not exist")) {
-          setErr("Audit-tabellen finnes ikke enda. Kjør SQL-en for order_audit.");
-        } else {
-          setErr(res.error.message);
+        if (resNoName.error) {
+          const msg = String(resNoName.error.message ?? "");
+          if (msg.toLowerCase().includes("does not exist")) {
+            setErr("Audit-tabellen finnes ikke enda. Kjør SQL-en for order_audit.");
+          } else {
+            setErr(resNoName.error.message);
+          }
+          return;
         }
+
+        setAuditByOrderId((prev) => ({
+          ...prev,
+          [orderId]: (resNoName.data ?? []) as any,
+        }));
         return;
       }
 
-      setAuditByOrderId((prev) => ({
-        ...prev,
-        [orderId]: (res.data ?? []) as any,
-      }));
+      // Annen feil enn manglende kolonne
+      const msg = String(resWithName.error.message ?? "");
+      if (msg.toLowerCase().includes("does not exist")) {
+        setErr("Audit-tabellen finnes ikke enda. Kjør SQL-en for order_audit.");
+      } else {
+        setErr(resWithName.error.message);
+      }
     } finally {
       setAuditBusyId(null);
     }
   }
-
   if (loading) return <div className="p-6">Laster…</div>;
 
-  // Sikkerhet: må være innkjøper eller admin
   if (!roleOk) {
     return (
       <div className="p-6 space-y-3">
@@ -547,9 +586,7 @@ export default function PurchasingPage() {
       <div className="rounded-2xl border p-4 bg-white space-y-3">
         <div className="grid gap-3 md:grid-cols-[1fr_220px_220px]">
           <div>
-            <label className="block text-xs font-medium text-gray-600">
-              Søk
-            </label>
+            <label className="block text-xs font-medium text-gray-600">Søk</label>
             <input
               value={q}
               onChange={(e) => setQ(e.target.value)}
@@ -559,9 +596,7 @@ export default function PurchasingPage() {
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-gray-600">
-              Status
-            </label>
+            <label className="block text-xs font-medium text-gray-600">Status</label>
             <select
               className="mt-1 w-full rounded-xl border px-3 py-2 text-sm bg-white outline-none focus:border-gray-400"
               value={statusFilter}
@@ -577,9 +612,7 @@ export default function PurchasingPage() {
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-gray-600">
-              Arbeidskø
-            </label>
+            <label className="block text-xs font-medium text-gray-600">Arbeidskø</label>
             <select
               className="mt-1 w-full rounded-xl border px-3 py-2 text-sm bg-white outline-none focus:border-gray-400"
               value={queueMode}
@@ -597,9 +630,7 @@ export default function PurchasingPage() {
       </div>
 
       {filtered.length === 0 ? (
-        <div className="rounded-lg border p-4 text-sm text-gray-600">
-          Ingen ordrer.
-        </div>
+        <div className="rounded-lg border p-4 text-sm text-gray-600">Ingen ordrer.</div>
       ) : (
         <div className="space-y-3">
           {filtered.map((o) => (
@@ -626,22 +657,18 @@ function OrderCard({
   auditBusy,
 }: {
   o: OrderRow;
-  onSave: (
-    id: string,
-    patch: Partial<OrderRow>,
-    before?: OrderRow
-  ) => Promise<void>;
+  onSave: (id: string, patch: Partial<OrderRow>, before?: OrderRow) => Promise<void>;
   onLoadAudit: (orderId: string) => Promise<void>;
   audit: OrderAuditRow[] | null;
   auditBusy: boolean;
 }) {
   const router = useRouter();
 
-  const [status, setStatus] = useState(o.status);
-  const [eta, setEta] = useState(o.expected_delivery_date ?? "");
-  const [info, setInfo] = useState(o.delivery_info ?? "");
-  const [confirmPath, setConfirmPath] = useState(o.confirmation_file_path ?? "");
-  const [note, setNote] = useState(o.purchaser_note ?? "");
+  const [status, setStatus] = useState<string>(o.status);
+  const [eta, setEta] = useState<string>(o.expected_delivery_date ?? "");
+  const [info, setInfo] = useState<string>(o.delivery_info ?? "");
+  const [confirmPath, setConfirmPath] = useState<string>(o.confirmation_file_path ?? "");
+  const [note, setNote] = useState<string>(o.purchaser_note ?? "");
   const [busy, setBusy] = useState(false);
 
   const ageDays = daysSince(o.created_at);
@@ -678,6 +705,7 @@ function OrderCard({
                   "text-xs rounded-full border px-2 py-0.5",
                   ageDays >= 7 ? "border-amber-300 text-amber-800" : "text-gray-600"
                 )}
+                title="Alder i dager siden opprettelse"
               >
                 {ageDays}d
               </span>
@@ -727,7 +755,7 @@ function OrderCard({
           </button>
 
           <button
-            className="rounded-lg bg-black px-3 py-2 text-white text-sm hover:opacity-90"
+            className="rounded-lg bg-black px-3 py-2 text-white text-sm hover:opacity-90 disabled:opacity-50"
             onClick={() => onLoadAudit(o.id)}
             disabled={auditBusy}
             title="Vis siste endringer"
@@ -763,6 +791,7 @@ function OrderCard({
             value={eta}
             onChange={(e) => setEta(e.target.value)}
             placeholder="2026-02-28"
+            inputMode="numeric"
           />
         </label>
       </div>
@@ -803,6 +832,7 @@ function OrderCard({
       {audit ? (
         <div className="rounded-xl border bg-gray-50 p-3 space-y-2">
           <div className="text-sm font-semibold">Siste endringer</div>
+
           {audit.length === 0 ? (
             <div className="text-sm text-gray-600">Ingen historikk.</div>
           ) : (
@@ -817,8 +847,9 @@ function OrderCard({
                       ? a.actor_email
                       : "ukjent"}
                   </div>
-                  <pre className="mt-1 overflow-x-auto rounded-lg border bg-white p-2 text-[11px] leading-4">
-{JSON.stringify(a.diff, null, 2)}
+
+                  <pre className="mt-1 overflow-x-auto rounded-lg border bg-white p-2 text-[11px] leading-4 whitespace-pre">
+                    {JSON.stringify(a.diff, null, 2)}
                   </pre>
                 </li>
               ))}
@@ -832,24 +863,25 @@ function OrderCard({
         className="rounded-lg bg-black px-4 py-2 text-white disabled:opacity-50 hover:opacity-90"
         onClick={async () => {
           setBusy(true);
-          const before: OrderRow = { ...o };
-
-          await onSave(
-            o.id,
-            {
-              status,
-              expected_delivery_date: eta || null,
-              delivery_info: info || null,
-              confirmation_file_path: confirmPath || null,
-              purchaser_note: note || null,
-            },
-            before
-          );
-
-          setBusy(false);
+          try {
+            const before: OrderRow = { ...o };
+            await onSave(
+              o.id,
+              {
+                status,
+                expected_delivery_date: eta || null,
+                delivery_info: info || null,
+                confirmation_file_path: confirmPath || null,
+                purchaser_note: note || null,
+              },
+              before
+            );
+          } finally {
+            setBusy(false);
+          }
         }}
       >
-        Lagre
+        {busy ? "Lagrer…" : "Lagre"}
       </button>
     </div>
   );
