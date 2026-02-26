@@ -1,35 +1,31 @@
 // file: web/src/app/login/page.tsx
 "use client";
 
-export const dynamic = "force-dynamic"; // hindrer prerender under build
-
 import { useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { supabaseBrowser } from "@/lib/supabase/browser";
 
 export default function LoginPage() {
   const [busy, setBusy] = useState(false);
+  const sp = useSearchParams();
+
+  const cb = sp.get("cb");
+  const detail = sp.get("detail");
 
   async function signInGoogle() {
     setBusy(true);
-    try {
-      // Lazy import -> hindrer at supabase/browser evalueres under build/prerender
-      const { supabaseBrowser } = await import("@/lib/supabase/browser");
-      const supabase = supabaseBrowser();
+    const supabase = supabaseBrowser();
 
-      const { error } = await supabase.auth.signInWithOAuth({
-        provider: "google",
-        options: {
-          redirectTo: `${window.location.origin}/auth/callback`,
-        },
-      });
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: "google",
+      options: {
+        redirectTo: `${window.location.origin}/auth/callback`,
+      },
+    });
 
-      if (error) {
-        console.error(error);
-        alert(error.message);
-        setBusy(false);
-      }
-    } catch (e) {
-      console.error(e);
-      alert("Innlogging feilet (klient). Sjekk console/logs.");
+    if (error) {
+      console.error(error);
+      alert(error.message);
       setBusy(false);
     }
   }
@@ -43,6 +39,21 @@ export default function LoginPage() {
             Produktkatalog og bestillingssystem for intern bruk.
           </p>
         </div>
+
+        {/* DEBUG/FEILVISNING */}
+        {cb && (
+          <div className="rounded-xl border bg-red-50 p-4 text-sm text-red-800">
+            <div className="font-semibold">Innlogging stoppet</div>
+            <div className="mt-1">
+              <span className="font-medium">Steg:</span> {cb}
+            </div>
+            {detail && (
+              <div className="mt-1 break-words">
+                <span className="font-medium">Detaljer:</span> {detail}
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="rounded-2xl border bg-white p-8 shadow-sm space-y-6">
           <div className="space-y-2 text-center">

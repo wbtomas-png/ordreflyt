@@ -5,68 +5,60 @@ import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabase/server";
 import { supabaseServiceServer } from "@/lib/supabase/server-clients";
 
+function toLogin(origin: string, step: string, detail?: string) {
+  const u = new URL("/login", origin);
+  u.searchParams.set("cb", step);
+  if (detail) u.searchParams.set("detail", detail);
+  return NextResponse.redirect(u);
+}
+
 export async function GET(req: Request) {
   const url = new URL(req.url);
 
   const code = url.searchParams.get("code");
   const next = url.searchParams.get("next") || "/products";
 
-  // Hvis Supabase sender error i query
-  const error = url.searchParams.get("error");
-  const errorDesc = url.searchParams.get("error_description");
-  if (error) {
-    const loginUrl = new URL("/login", url.origin);
-    loginUrl.searchParams.set("error", error);
-    if (errorDesc) loginUrl.searchParams.set("error_description", errorDesc);
-    return NextResponse.redirect(loginUrl);
+  const oauthErr = url.searchParams.get("error");
+  const oauthDesc = url.searchParams.get("error_description");
+
+  if (oauthErr) {
+    return toLogin(url.origin, "oauth_error", `${oauthErr}${oauthDesc ? `: ${oauthDesc}` : ""}`);
   }
 
   if (!code) {
-    return NextResponse.redirect(new URL("/login", url.origin));
+    return toLogin(url.origin, "missing_code");
   }
 
-  // 1) Bytt code -> session (setter cookies via supabaseServer())
   const supabase = await supabaseServer();
 
-  const exchanged = await supabase.auth.exchangeCodeForSession(code);
-  if (exchanged.error) {
-    const loginUrl = new URL("/login", url.origin);
-    loginUrl.searchParams.set("error", exchanged.error.message);
-    return NextResponse.redirect(loginUrl);
+  const ex = await supabase.auth.exchangeCodeForSession(code);
+  if (ex.error) {
+    return toLogin(url.origin, "exchange_failed", ex.error.message);
   }
 
-  // 2) Hent session og sjekk allowlist (server-side)
-  const { data: sessionRes } = await supabase.auth.getSession();
-  const session = sessionRes.session;
+  const ses = await supabase.auth.getSession();
+  const session = ses.data.session;
 
   if (!session?.user?.email) {
-    const loginUrl = new URL("/login", url.origin);
-    loginUrl.searchParams.set("error", "No session after exchange");
-    return NextResponse.redirect(loginUrl);
+    return toLogin(url.origin, "no_session_after_exchange");
   }
 
   const email = session.user.email.toLowerCase();
 
   const svc = supabaseServiceServer();
-  const { data: allowed, error: allowErr } = await svc
+  const allowed = await svc
     .from("allowed_emails")
     .select("email")
     .eq("email", email)
     .maybeSingle();
 
-  if (allowErr) {
-    const loginUrl = new URL("/login", url.origin);
-    loginUrl.searchParams.set("error", allowErr.message);
-    return NextResponse.redirect(loginUrl);
+  if (allowed.error) {
+    return toLogin(url.origin, "allowlist_db_error", allowed.error.message);
   }
 
-  if (!allowed?.email) {
-    // Valgfritt: logg ut ved å fjerne cookies (ikke alltid nødvendig)
-    const deniedUrl = new URL("/login", url.origin);
-    deniedUrl.searchParams.set("denied", "1");
-    return NextResponse.redirect(deniedUrl);
+  if (!allowed.data?.email) {
+    return toLogin(url.origin, "denied", email);
   }
 
-  // 3) Ferdig: redirect inn i appen
   return NextResponse.redirect(new URL(next, url.origin));
 }
