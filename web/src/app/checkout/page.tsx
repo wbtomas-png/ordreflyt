@@ -1,3 +1,4 @@
+// file: web/src/app/checkout/page.tsx
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
@@ -7,7 +8,9 @@ import { CartItem, clearCart, getCart } from "@/lib/cart";
 
 export default function CheckoutPage() {
   const router = useRouter();
-  const supabase = useMemo(() => supabaseBrowser(), []);
+
+  // Viktig: cast til any for å unngå Supabase never-typing
+  const supabase = useMemo(() => supabaseBrowser() as any, []);
 
   const [items, setItems] = useState<CartItem[]>([]);
   const [busy, setBusy] = useState(false);
@@ -39,21 +42,36 @@ export default function CheckoutPage() {
   async function submitOrder() {
     if (items.length === 0) return;
 
-    if (!project_name.trim()) return alert("Prosjektnavn må fylles ut.");
-    if (!contact_name.trim()) return alert("Kontaktperson må fylles ut.");
-    if (!delivery_address.trim()) return alert("Leveringsadresse må fylles ut.");
+    if (!project_name.trim()) {
+      alert("Prosjektnavn må fylles ut.");
+      return;
+    }
+
+    if (!contact_name.trim()) {
+      alert("Kontaktperson må fylles ut.");
+      return;
+    }
+
+    if (!delivery_address.trim()) {
+      alert("Leveringsadresse må fylles ut.");
+      return;
+    }
 
     setBusy(true);
 
     const { data: u } = await supabase.auth.getUser();
     const user = u.user;
+
     if (!user) {
       setBusy(false);
       router.replace("/login");
       return;
     }
 
-    const { data: order, error: orderErr } = await supabase
+    // ------------------------
+    // Opprett ordre
+    // ------------------------
+    const { data: order, error: orderErr } = await (supabase as any)
       .from("orders")
       .insert({
         created_by: user.id,
@@ -66,17 +84,24 @@ export default function CheckoutPage() {
         delivery_postcode: delivery_postcode.trim() || null,
         delivery_city: delivery_city.trim() || null,
         comment: comment.trim() || null,
-      })
+      } as any)
       .select("id")
       .single();
 
     if (orderErr || !order) {
       console.error(orderErr);
-      alert(`Kunne ikke opprette ordre: ${orderErr?.message ?? "ukjent feil"}`);
+      alert(
+        `Kunne ikke opprette ordre: ${
+          orderErr?.message ?? "ukjent feil"
+        }`
+      );
       setBusy(false);
       return;
     }
 
+    // ------------------------
+    // Opprett ordrelinjer
+    // ------------------------
     const rows = items.map((x) => ({
       order_id: order.id,
       product_id: x.product_id,
@@ -86,7 +111,9 @@ export default function CheckoutPage() {
       qty: x.qty,
     }));
 
-    const { error: itemsErr } = await supabase.from("order_items").insert(rows);
+    const { error: itemsErr } = await (supabase as any)
+      .from("order_items")
+      .insert(rows as any);
 
     if (itemsErr) {
       console.error(itemsErr);
@@ -119,6 +146,7 @@ export default function CheckoutPage() {
         </div>
       ) : (
         <>
+          {/* Prosjekt */}
           <div className="grid gap-3 rounded-xl border p-4">
             <label className="text-sm">
               Prosjektnavn *
@@ -139,6 +167,7 @@ export default function CheckoutPage() {
             </label>
           </div>
 
+          {/* Kontakt */}
           <div className="grid gap-3 rounded-xl border p-4">
             <div className="font-semibold">Kontakt</div>
 
@@ -170,6 +199,7 @@ export default function CheckoutPage() {
             </label>
           </div>
 
+          {/* Levering */}
           <div className="grid gap-3 rounded-xl border p-4">
             <div className="font-semibold">Levering</div>
 
