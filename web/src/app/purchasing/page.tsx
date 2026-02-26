@@ -124,6 +124,24 @@ function looksLikeMissingColumn(err: any, col: string) {
   return msg.includes("does not exist") && msg.includes(col.toLowerCase());
 }
 
+function isOrderRow(x: unknown): x is OrderRow {
+  if (!x || typeof x !== "object") return false;
+  const o = x as any;
+  return (
+    typeof o.id === "string" &&
+    typeof o.created_at === "string" &&
+    typeof o.status === "string" &&
+    typeof o.project_name === "string" &&
+    typeof o.contact_name === "string" &&
+    typeof o.delivery_address === "string"
+  );
+}
+
+function coerceOrderRows(input: unknown): OrderRow[] {
+  if (!Array.isArray(input)) return [];
+  return input.filter(isOrderRow);
+}
+
 async function loadOrders(supabase: ReturnType<typeof supabaseBrowser>) {
   const withUpdated = [
     "id",
@@ -186,7 +204,11 @@ async function loadOrders(supabase: ReturnType<typeof supabaseBrowser>) {
 
 export default function PurchasingPage() {
   const router = useRouter();
+
+  // NB: Supabase without generated DB types -> mutations become `never`.
+  // We keep the client normal, but cast the mutation builders to `any` locally.
   const supabase = useMemo(() => supabaseBrowser(), []);
+  const supabaseAny = supabase as any;
 
   const [rows, setRows] = useState<OrderRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -224,8 +246,16 @@ export default function PurchasingPage() {
         return;
       }
 
+      let token: string | null = null;
       const { data: sess } = await supabase.auth.getSession();
-      const token = sess.session?.access_token;
+      token = sess.session?.access_token ?? null;
+
+      // fallback refresh
+      if (!token) {
+        const { data: refreshed } = await supabase.auth.refreshSession();
+        token = refreshed.session?.access_token ?? null;
+      }
+
       if (!token) {
         router.replace("/login");
         return;
@@ -271,27 +301,7 @@ export default function PurchasingPage() {
         return;
       }
 
-            const rawUnknown = (data ?? []) as unknown[];
-
-      const cleaned: OrderRow[] = Array.isArray(rawUnknown)
-        ? rawUnknown
-            .filter((x) => {
-              if (!x || typeof x !== "object") return false;
-              const o = x as any;
-              return (
-                typeof o.id === "string" &&
-                typeof o.created_at === "string" &&
-                typeof o.status === "string" &&
-                typeof o.project_name === "string" &&
-                typeof o.contact_name === "string" &&
-                typeof o.delivery_address === "string"
-              );
-            })
-            .map((x) => x as OrderRow)
-        : [];
-
-      setRows(cleaned);
-      setRows(cleaned);
+      setRows(coerceOrderRows(data));
       setLoading(false);
     })();
 
@@ -351,43 +361,40 @@ export default function PurchasingPage() {
     return list;
   }, [rows, q, statusFilter, queueMode]);
 
-  async function updateOrder(
-    id: string,
-    patch: Partial<OrderRow>,
-    before?: OrderRow
-  ) {
+  async function updateOrder(id: string, patch: Partial<OrderRow>, before?: OrderRow) {
     setErr(null);
 
     const nowIso = new Date().toISOString();
 
-    const payloadWithUpdated: any = {
-      status: patch.status,
-      expected_delivery_date: patch.expected_delivery_date,
-      delivery_info: patch.delivery_info,
-      confirmation_file_path: patch.confirmation_file_path,
-      purchaser_note: patch.purchaser_note,
+    // build payloads (do not include undefined keys)
+    const basePayload: Record<string, any> = {};
+    if ("status" in patch) basePayload.status = patch.status ?? null;
+    if ("expected_delivery_date" in patch)
+      basePayload.expected_delivery_date = patch.expected_delivery_date ?? null;
+    if ("delivery_info" in patch) basePayload.delivery_info = patch.delivery_info ?? null;
+    if ("confirmation_file_path" in patch)
+      basePayload.confirmation_file_path = patch.confirmation_file_path ?? null;
+    if ("purchaser_note" in patch) basePayload.purchaser_note = patch.purchaser_note ?? null;
+
+    const payloadWithUpdated: Record<string, any> = {
+      ...basePayload,
       updated_at: nowIso,
       updated_by_name: myName || null,
     };
 
-    let upd = await supabase.from("orders").update(payloadWithUpdated).eq("id", id);
+    // ✅ CRITICAL: cast the builder to any to avoid `never`
+    let upd = await supabaseAny.from("orders").update(payloadWithUpdated).eq("id", id);
 
     if (
       upd.error &&
       (looksLikeMissingColumn(upd.error, "updated_at") ||
         looksLikeMissingColumn(upd.error, "updated_by_name"))
     ) {
-      const payloadBase: any = {
-        status: patch.status,
-        expected_delivery_date: patch.expected_delivery_date,
-        delivery_info: patch.delivery_info,
-        confirmation_file_path: patch.confirmation_file_path,
-        purchaser_note: patch.purchaser_note,
-      };
-      upd = await supabase.from("orders").update(payloadBase).eq("id", id);
+      upd = await supabaseAny.from("orders").update(basePayload).eq("id", id);
     }
 
     if (upd.error) {
+      console.error("orders update failed:", upd.error);
       alert(upd.error.message);
       return;
     }
@@ -412,21 +419,22 @@ export default function PurchasingPage() {
       }
 
       if (Object.keys(diff).length > 0) {
-        let ins = await supabase.from("order_audit").insert({
+        let ins = await supabaseAny.from("order_audit").insert({
           order_id: id,
           actor_name: myName || null,
           actor_email: myEmail || null,
           action: "UPDATE",
           diff,
-        } as any);
+        });
 
+        // fallback if actor_name column doesn't exist
         if (ins.error && looksLikeMissingColumn(ins.error, "actor_name")) {
-          await supabase.from("order_audit").insert({
+          await supabaseAny.from("order_audit").insert({
             order_id: id,
             actor_email: myEmail || "unknown",
             action: "UPDATE",
             diff,
-          } as any);
+          });
         }
       }
     } catch (e) {
@@ -442,15 +450,14 @@ export default function PurchasingPage() {
     );
 
     setToast("Lagret");
-    setTimeout(() => setToast(null), 1000);
+    window.setTimeout(() => setToast(null), 1000);
   }
 
-    async function loadAudit(orderId: string) {
+  async function loadAudit(orderId: string) {
     setErr(null);
     setAuditBusyId(orderId);
 
     try {
-      // Forsøk 1: med actor_name
       const resWithName = await supabase
         .from("order_audit")
         .select("id, order_id, created_at, actor_name, actor_email, action, diff")
@@ -458,7 +465,6 @@ export default function PurchasingPage() {
         .order("created_at", { ascending: false })
         .limit(5);
 
-      // Hvis OK -> bruk den
       if (!resWithName.error) {
         setAuditByOrderId((prev) => ({
           ...prev,
@@ -467,7 +473,6 @@ export default function PurchasingPage() {
         return;
       }
 
-      // Hvis feilen skyldes manglende kolonne -> fallback uten actor_name
       if (looksLikeMissingColumn(resWithName.error, "actor_name")) {
         const resNoName = await supabase
           .from("order_audit")
@@ -493,7 +498,6 @@ export default function PurchasingPage() {
         return;
       }
 
-      // Annen feil enn manglende kolonne
       const msg = String(resWithName.error.message ?? "");
       if (msg.toLowerCase().includes("does not exist")) {
         setErr("Audit-tabellen finnes ikke enda. Kjør SQL-en for order_audit.");
@@ -504,6 +508,7 @@ export default function PurchasingPage() {
       setAuditBusyId(null);
     }
   }
+
   if (loading) return <div className="p-6">Laster…</div>;
 
   if (!roleOk) {
@@ -525,9 +530,7 @@ export default function PurchasingPage() {
   const openCount = rows.filter(
     (o) => !["DELIVERED", "CANCELLED"].includes(String(o.status))
   ).length;
-  const overdueCount = rows.filter((o) =>
-    isEtaOverdue(o.expected_delivery_date)
-  ).length;
+  const overdueCount = rows.filter((o) => isEtaOverdue(o.expected_delivery_date)).length;
   const soonCount = rows.filter((o) => isEtaSoon(o.expected_delivery_date, 7)).length;
 
   return (
@@ -551,36 +554,22 @@ export default function PurchasingPage() {
           Åpne: <span className="font-medium text-gray-800">{openCount}</span>
           <span className="mx-2">·</span>
           ETA passert:{" "}
-          <span
-            className={cn(
-              "font-medium",
-              overdueCount ? "text-red-700" : "text-gray-800"
-            )}
-          >
+          <span className={cn("font-medium", overdueCount ? "text-red-700" : "text-gray-800")}>
             {overdueCount}
           </span>
           <span className="mx-2">·</span>
           ETA innen 7 dager:{" "}
-          <span
-            className={cn(
-              "font-medium",
-              soonCount ? "text-amber-700" : "text-gray-800"
-            )}
-          >
+          <span className={cn("font-medium", soonCount ? "text-amber-700" : "text-gray-800")}>
             {soonCount}
           </span>
         </div>
       </div>
 
       {err ? (
-        <div className="rounded-xl border bg-white px-4 py-3 text-sm text-red-700">
-          {err}
-        </div>
+        <div className="rounded-xl border bg-white px-4 py-3 text-sm text-red-700">{err}</div>
       ) : null}
       {toast ? (
-        <div className="rounded-xl border bg-white px-4 py-3 text-sm text-green-700">
-          {toast}
-        </div>
+        <div className="rounded-xl border bg-white px-4 py-3 text-sm text-green-700">{toast}</div>
       ) : null}
 
       <div className="rounded-2xl border p-4 bg-white space-y-3">
