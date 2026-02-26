@@ -49,6 +49,8 @@ type ProductRelationRow = {
   related_product: ProductRow[] | null;
 };
 
+type ProfileRoleRow = { role: string | null };
+
 const IMAGE_BUCKET = "product-images";
 const FILE_BUCKET = "product-files";
 
@@ -121,6 +123,9 @@ export default function AdminProductDetailsPage() {
   const params = useParams<{ id: string }>();
   const supabase = useMemo(() => supabaseBrowser(), []);
 
+  // NOTE: vi caster én gang for å unngå "never" i Next build (Database-typene er ikke med i web)
+  const sb = supabase as any;
+
   const [loading, setLoading] = useState(true);
   const [roleOk, setRoleOk] = useState<boolean | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -168,8 +173,7 @@ export default function AdminProductDetailsPage() {
     setRelationsError(null);
 
     try {
-      // join mot products for å vise navn/pris osv på relaterte produkter
-      const { data, error } = await supabase
+      const { data, error } = await sb
         .from("product_relations")
         .select(
           `
@@ -191,7 +195,6 @@ export default function AdminProductDetailsPage() {
 
       if (error) throw error;
 
-      // Supabase kan gi "any" – tving via unknown for TS-bygg
       setRelations(((data ?? []) as unknown) as ProductRelationRow[]);
     } catch (e: unknown) {
       console.error(e);
@@ -217,18 +220,18 @@ export default function AdminProductDetailsPage() {
         return;
       }
 
-      type ProfileRoleRow = { role: string | null };
+      // rolle-sjekk
+      const { data: prof, error: profErr } = (await sb
+        .from("profiles")
+        .select("role")
+        .eq("user_id", auth.user.id)
+        .maybeSingle()) as { data: ProfileRoleRow | null; error: any };
 
-const { data: prof, error: profErr } = (await supabase
-  .from("profiles" as any)
-  .select("role")
-  .eq("user_id", auth.user.id)
-  .maybeSingle()) as { data: ProfileRoleRow | null; error: any };
+      if (profErr) console.error(profErr);
 
-if (profErr) console.error(profErr);
+      const role = String(prof?.role ?? "").toUpperCase();
+      const ok = role === "ADMIN";
 
-const role = String(prof?.role ?? "").toUpperCase();
-const ok = role === "ADMIN";
       if (!alive) return;
 
       setRoleOk(ok);
@@ -237,7 +240,8 @@ const ok = role === "ADMIN";
         return;
       }
 
-      const { data: p, error: pErr } = await supabase
+      // produkt
+      const { data: p, error: pErr } = await sb
         .from("products")
         .select("id, product_no, name, list_price, thumb_path, is_active")
         .eq("id", productId)
@@ -268,10 +272,11 @@ const ok = role === "ADMIN";
       );
       setIsActive((pr.is_active ?? true) === true);
 
-      const { data: img, error: imgErr } = await supabase
+      // bilder
+      const { data: img, error: imgErr } = await sb
         .from("product_images")
         .select(
-          "id, product_id, storage_bucket, storage_path, caption, sort_order, created_at"
+          "id, product_id, storage_bucket, storage_path, caption, sort_order, created_at, path"
         )
         .eq("product_id", productId)
         .order("sort_order", { ascending: true })
@@ -283,10 +288,11 @@ const ok = role === "ADMIN";
         console.error(imgErr);
         setImages([]);
       } else {
-        setImages((img ?? []) as ProductImageRow[]);
+        setImages(((img ?? []) as unknown) as ProductImageRow[]);
       }
 
-      const { data: f, error: fErr } = await supabase
+      // dokumenter
+      const { data: f, error: fErr } = await sb
         .from("product_files")
         .select("id, product_id, relative_path, file_type, title, created_at")
         .eq("product_id", productId)
@@ -298,19 +304,19 @@ const ok = role === "ADMIN";
         console.error(fErr);
         setFiles([]);
       } else {
-        setFiles((f ?? []) as ProductFileRow[]);
+        setFiles(((f ?? []) as unknown) as ProductFileRow[]);
       }
 
-      // relasjoner
       await refreshRelations();
 
+      if (!alive) return;
       setLoading(false);
     })();
 
     return () => {
       alive = false;
     };
-  }, [productId, router, supabase]);
+  }, [productId, router, supabase, sb]); // sb er stabil (fra supabase)
 
   // søk etter kandidater å legge til
   useEffect(() => {
@@ -326,8 +332,7 @@ const ok = role === "ADMIN";
 
       setRelSearching(true);
       try {
-        // enkel OR-søk: product_no eller name
-        const { data, error } = await supabase
+        const { data, error } = await sb
           .from("products")
           .select("id, product_no, name, list_price, thumb_path, is_active")
           .or(`product_no.ilike.%${q}%,name.ilike.%${q}%`)
@@ -338,9 +343,10 @@ const ok = role === "ADMIN";
 
         const rows = ((data ?? []) as unknown) as ProductRow[];
         const filtered = rows.filter((x) => x.id !== productId);
+
         if (!alive) return;
 
-        setRelCandidates(filtered as ProductRow[]);
+        setRelCandidates(filtered);
         setRelSelectedId(filtered[0]?.id ?? "");
       } catch (e) {
         console.error(e);
@@ -355,7 +361,7 @@ const ok = role === "ADMIN";
     return () => {
       alive = false;
     };
-  }, [relSearch, productId, supabase]);
+  }, [relSearch, productId, sb]);
 
   async function saveProduct() {
     if (!product) return;
@@ -384,10 +390,7 @@ const ok = role === "ADMIN";
       is_active: isActive,
     };
 
-        const { error } = await (supabase as any)
-  .from("products")
-  .update(patch)
-  .eq("id", product.id);
+    const { error } = await sb.from("products").update(patch).eq("id", product.id);
 
     setSavingProduct(false);
 
@@ -421,7 +424,7 @@ const ok = role === "ADMIN";
 
       if (upErr) throw upErr;
 
-      const { error: dbErr } = await supabase
+      const { error: dbErr } = await sb
         .from("products")
         .update({ thumb_path: path })
         .eq("id", product.id);
@@ -434,9 +437,7 @@ const ok = role === "ADMIN";
     } catch (e: unknown) {
       console.error(e);
       alert(
-        `Opplasting feilet: ${
-          e instanceof Error ? e.message : "Ukjent feil"
-        }`
+        `Opplasting feilet: ${e instanceof Error ? e.message : "Ukjent feil"}`
       );
     } finally {
       setUploadingThumb(false);
@@ -492,21 +493,23 @@ const ok = role === "ADMIN";
         });
       }
 
-      const { data: created, error: insErr } = await supabase
+      const { data: created, error: insErr } = await sb
         .from("product_images")
         .insert(inserts)
         .select(
-          "id, product_id, storage_bucket, storage_path, caption, sort_order, created_at"
+          "id, product_id, storage_bucket, storage_path, caption, sort_order, created_at, path"
         );
 
       if (insErr) throw insErr;
 
       setImages((prev) =>
-        [...prev, ...((created ?? []) as ProductImageRow[])].sort((a, b) => {
-          const sa = typeof a.sort_order === "number" ? a.sort_order : 0;
-          const sb = typeof b.sort_order === "number" ? b.sort_order : 0;
-          return sa - sb;
-        })
+        [...prev, ...(((created ?? []) as unknown) as ProductImageRow[])].sort(
+          (a, b) => {
+            const sa = typeof a.sort_order === "number" ? a.sort_order : 0;
+            const sb2 = typeof b.sort_order === "number" ? b.sort_order : 0;
+            return sa - sb2;
+          }
+        )
       );
 
       setGalleryFiles([]);
@@ -515,9 +518,7 @@ const ok = role === "ADMIN";
     } catch (e: unknown) {
       console.error(e);
       alert(
-        `Opplasting feilet: ${
-          e instanceof Error ? e.message : "Ukjent feil"
-        }`
+        `Opplasting feilet: ${e instanceof Error ? e.message : "Ukjent feil"}`
       );
     } finally {
       setUploadingGallery(false);
@@ -563,23 +564,24 @@ const ok = role === "ADMIN";
         });
       }
 
-      const { data: created, error: insErr } = await supabase
+      const { data: created, error: insErr } = await sb
         .from("product_files")
         .insert(inserts)
         .select("id, product_id, relative_path, file_type, title, created_at");
 
       if (insErr) throw insErr;
 
-      setFiles((prev) => [...((created ?? []) as ProductFileRow[]), ...prev]);
+      setFiles((prev) => [
+        ...(((created ?? []) as unknown) as ProductFileRow[]),
+        ...prev,
+      ]);
       setDocFiles([]);
       if (docsInputRef.current) docsInputRef.current.value = "";
       alert("Dokument(er) lastet opp.");
     } catch (e: unknown) {
       console.error(e);
       alert(
-        `Opplasting feilet: ${
-          e instanceof Error ? e.message : "Ukjent feil"
-        }`
+        `Opplasting feilet: ${e instanceof Error ? e.message : "Ukjent feil"}`
       );
     } finally {
       setUploadingDocs(false);
@@ -597,7 +599,7 @@ const ok = role === "ADMIN";
       const { error: stErr } = await supabase.storage.from(bucket).remove([path]);
       if (stErr) throw stErr;
 
-      const { error: dbErr } = await supabase
+      const { error: dbErr } = await sb
         .from("product_images")
         .delete()
         .eq("id", row.id);
@@ -606,7 +608,9 @@ const ok = role === "ADMIN";
       setImages((prev) => prev.filter((x) => x.id !== row.id));
     } catch (e: unknown) {
       console.error(e);
-      alert(`Kunne ikke slette: ${e instanceof Error ? e.message : "Ukjent feil"}`);
+      alert(
+        `Kunne ikke slette: ${e instanceof Error ? e.message : "Ukjent feil"}`
+      );
     }
   }
 
@@ -619,16 +623,15 @@ const ok = role === "ADMIN";
         .remove([row.relative_path]);
       if (stErr) throw stErr;
 
-      const { error: dbErr } = await supabase
-        .from("product_files")
-        .delete()
-        .eq("id", row.id);
+      const { error: dbErr } = await sb.from("product_files").delete().eq("id", row.id);
       if (dbErr) throw dbErr;
 
       setFiles((prev) => prev.filter((x) => x.id !== row.id));
     } catch (e: unknown) {
       console.error(e);
-      alert(`Kunne ikke slette: ${e instanceof Error ? e.message : "Ukjent feil"}`);
+      alert(
+        `Kunne ikke slette: ${e instanceof Error ? e.message : "Ukjent feil"}`
+      );
     }
   }
 
@@ -644,7 +647,7 @@ const ok = role === "ADMIN";
         .remove([path]);
       if (stErr) throw stErr;
 
-      const { error: dbErr } = await supabase
+      const { error: dbErr } = await sb
         .from("products")
         .update({ thumb_path: null })
         .eq("id", product.id);
@@ -654,7 +657,9 @@ const ok = role === "ADMIN";
       alert("Thumbnail slettet.");
     } catch (e: unknown) {
       console.error(e);
-      alert(`Kunne ikke slette: ${e instanceof Error ? e.message : "Ukjent feil"}`);
+      alert(
+        `Kunne ikke slette: ${e instanceof Error ? e.message : "Ukjent feil"}`
+      );
     }
   }
 
@@ -671,12 +676,11 @@ const ok = role === "ADMIN";
     setRelationsError(null);
 
     try {
-      // finn max sort for denne typen
       const maxSort = relations
         .filter((r) => r.relation_type === relType)
         .reduce((m, r) => Math.max(m, r.sort_order ?? 0), 0);
 
-      const { error } = await supabase.from("product_relations").insert({
+      const { error } = await sb.from("product_relations").insert({
         product_id: product.id,
         related_product_id: rid,
         relation_type: relType,
@@ -702,11 +706,7 @@ const ok = role === "ADMIN";
     if (!confirm("Fjerne koblingen?")) return;
 
     try {
-      const { error } = await supabase
-        .from("product_relations")
-        .delete()
-        .eq("id", row.id);
-
+      const { error } = await sb.from("product_relations").delete().eq("id", row.id);
       if (error) throw error;
 
       setRelations((prev) => prev.filter((x) => x.id !== row.id));
@@ -927,7 +927,9 @@ const ok = role === "ADMIN";
                     relCandidates.map((c) => (
                       <option key={c.id} value={c.id}>
                         {c.product_no} — {c.name ?? "(uten navn)"}{" "}
-                        {c.list_price != null ? `— ${formatNok(c.list_price)}` : ""}
+                        {c.list_price != null
+                          ? `— ${formatNok(c.list_price)}`
+                          : ""}
                       </option>
                     ))
                   )}
@@ -972,7 +974,9 @@ const ok = role === "ADMIN";
                               {rp?.name ?? "(uten navn)"}
                             </div>
                             <div className="text-xs text-gray-600">
-                              {rp?.list_price != null ? formatNok(rp.list_price) : ""}
+                              {rp?.list_price != null
+                                ? formatNok(rp.list_price)
+                                : ""}
                             </div>
                           </div>
                           <button
@@ -1012,7 +1016,9 @@ const ok = role === "ADMIN";
                               {rp?.name ?? "(uten navn)"}
                             </div>
                             <div className="text-xs text-gray-600">
-                              {rp?.list_price != null ? formatNok(rp.list_price) : ""}
+                              {rp?.list_price != null
+                                ? formatNok(rp.list_price)
+                                : ""}
                             </div>
                           </div>
                           <button
@@ -1035,7 +1041,9 @@ const ok = role === "ADMIN";
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="font-semibold">Bilder (galleri)</h2>
-                <div className="text-sm text-gray-600">{images.length} bilde(r)</div>
+                <div className="text-sm text-gray-600">
+                  {images.length} bilde(r)
+                </div>
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
@@ -1070,7 +1078,7 @@ const ok = role === "ADMIN";
                   <div key={img.id} className="rounded-xl border p-3 space-y-2">
                     <div className="flex items-start justify-between gap-2">
                       <div className="text-xs text-gray-600 break-all">
-                        {img.storage_path}
+                        {img.storage_path || img.path}
                       </div>
                       <button
                         className="rounded-lg border px-2 py-1 text-xs hover:bg-gray-50"
@@ -1091,7 +1099,9 @@ const ok = role === "ADMIN";
                               imgPath(img)
                             );
                           } catch (e: unknown) {
-                            alert(e instanceof Error ? e.message : "Kunne ikke åpne.");
+                            alert(
+                              e instanceof Error ? e.message : "Kunne ikke åpne."
+                            );
                           }
                         }}
                       >
@@ -1122,7 +1132,9 @@ const ok = role === "ADMIN";
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="font-semibold">Dokumenter</h2>
-                <div className="text-sm text-gray-600">{files.length} fil(er)</div>
+                <div className="text-sm text-gray-600">
+                  {files.length} fil(er)
+                </div>
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
@@ -1173,9 +1185,15 @@ const ok = role === "ADMIN";
                         className="rounded-lg bg-black px-3 py-2 text-sm text-white"
                         onClick={async () => {
                           try {
-                            await openSignedUrl(supabase, FILE_BUCKET, f.relative_path);
+                            await openSignedUrl(
+                              supabase,
+                              FILE_BUCKET,
+                              f.relative_path
+                            );
                           } catch (e: unknown) {
-                            alert(e instanceof Error ? e.message : "Kunne ikke åpne.");
+                            alert(
+                              e instanceof Error ? e.message : "Kunne ikke åpne."
+                            );
                           }
                         }}
                       >
@@ -1234,7 +1252,11 @@ const ok = role === "ADMIN";
                   className="w-full rounded-lg bg-black px-4 py-2 text-sm text-white"
                   onClick={async () => {
                     try {
-                      await openSignedUrl(supabase, IMAGE_BUCKET, product.thumb_path!);
+                      await openSignedUrl(
+                        supabase,
+                        IMAGE_BUCKET,
+                        product.thumb_path!
+                      );
                     } catch (e: unknown) {
                       alert(e instanceof Error ? e.message : "Kunne ikke åpne.");
                     }
