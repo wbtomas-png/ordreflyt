@@ -1,22 +1,32 @@
-// file: web/src/app/auth/callback/page.tsx
-import { Suspense } from "react";
-import AuthCallbackClient from "./AuthCallbackClient";
+"use client";
 
-export default function AuthCallbackPage() {
-  return (
-    <Suspense fallback={<Fallback />}>
-      <AuthCallbackClient />
-    </Suspense>
-  );
-}
+import { useEffect } from "react";
+import { useRouter } from "next/navigation";
+import { supabaseBrowser } from "@/lib/supabase/browser";
 
-function Fallback() {
+export default function AuthCallbackClient() {
+  const router = useRouter();
+  const supabase = supabaseBrowser();
+
+  useEffect(() => {
+    (async () => {
+      // Gi supabase ett tick til å prosessere URL
+      await new Promise((r) => setTimeout(r, 50));
+
+      const { data } = await supabase.auth.getSession();
+
+      if (!data.session) {
+        router.replace("/login?cb=session_missing");
+        return;
+      }
+
+      router.replace("/products");
+    })();
+  }, [router, supabase]);
+
   return (
-    <div className="min-h-screen flex items-center justify-center p-6">
-      <div className="w-full max-w-md rounded-2xl border bg-white p-6 text-center">
-        <div className="text-lg font-semibold">OrderFlow</div>
-        <div className="mt-3 text-sm text-gray-600">Fullfører innlogging…</div>
-      </div>
+    <div className="min-h-screen flex items-center justify-center">
+      Fullfører innlogging…
     </div>
   );
 }
