@@ -17,6 +17,7 @@ type ProductRow = {
 };
 
 function formatNok(value?: number | null) {
+  if (value === null || value === undefined) return "";
   const v = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(v)) return "";
   return new Intl.NumberFormat("nb-NO", {
@@ -44,8 +45,8 @@ function safeProductNoCandidate(input: string) {
 
 export default function AdminProductsPage() {
   const router = useRouter();
-  const supabase = useMemo(() => supabaseBrowser(), []);
-
+  // Cast til any for å unngå "never" fra manglende/feil Supabase Database-typing
+  const supabase = useMemo(() => supabaseBrowser() as any, []);
   // Gate: må være invitert + admin
   const { me, loading: meLoading } = useRequireMe({ requireRole: "admin" });
 
@@ -65,7 +66,8 @@ export default function AdminProductsPage() {
   async function loadProducts(searchTerm?: string) {
     setErrorMsg(null);
 
-    let query = supabase
+    // Bygg query (hold alt på any for å unngå TS "never")
+    let query: any = (supabase as any)
       .from("products")
       .select("id, product_no, name, list_price, thumb_path, is_active, created_at")
       .order("created_at", { ascending: false });
@@ -79,11 +81,11 @@ export default function AdminProductsPage() {
     if (error) {
       console.error(error);
       setItems([]);
-      setErrorMsg(error.message);
+      setErrorMsg(error.message ?? "Kunne ikke hente produkter.");
       return;
     }
 
-    setItems((data ?? []) as ProductRow[]);
+    setItems(((data ?? []) as unknown) as ProductRow[]);
   }
 
   // Last data når tilgang er avklart
@@ -136,7 +138,8 @@ export default function AdminProductsPage() {
       return;
     }
 
-    const price = newPrice.trim() === "" ? null : Number(newPrice.replace(",", "."));
+    const price =
+      newPrice.trim() === "" ? null : Number(newPrice.replace(",", "."));
     if (price !== null && !Number.isFinite(price)) {
       setErrorMsg("Ugyldig pris.");
       return;
@@ -144,14 +147,15 @@ export default function AdminProductsPage() {
 
     setCreating(true);
     try {
-      const { data, error } = await supabase
+      // NB: bruk newActive (ikke booleanValue)
+      const { data, error } = await (supabase as any)
         .from("products")
         .insert({
           product_no: pn,
           name: newName.trim() === "" ? null : newName.trim(),
           list_price: price,
           is_active: newActive,
-        })
+        } as any)
         .select("id")
         .single();
 
@@ -260,7 +264,9 @@ export default function AdminProductsPage() {
       </header>
 
       {errorMsg ? (
-        <div className="rounded-2xl border p-4 text-sm text-red-700">{errorMsg}</div>
+        <div className="rounded-2xl border p-4 text-sm text-red-700">
+          {errorMsg}
+        </div>
       ) : null}
 
       <section id="new-product-card" className="rounded-2xl border p-5 space-y-4">
@@ -302,7 +308,9 @@ export default function AdminProductsPage() {
               inputMode="numeric"
             />
             <div className="mt-1 text-xs text-gray-600">
-              {newPrice ? `Visning: ${formatNok(Number(newPrice.replace(",", ".")))}` : ""}
+              {newPrice
+                ? `Visning: ${formatNok(Number(newPrice.replace(",", ".")))}`
+                : ""}
             </div>
           </label>
         </div>
@@ -343,7 +351,9 @@ export default function AdminProductsPage() {
         </div>
 
         {items.length === 0 ? (
-          <div className="rounded-xl border p-4 text-sm text-gray-600">Ingen produkter funnet.</div>
+          <div className="rounded-xl border p-4 text-sm text-gray-600">
+            Ingen produkter funnet.
+          </div>
         ) : (
           <div className="grid gap-3">
             {items.map((p) => {
@@ -364,7 +374,11 @@ export default function AdminProductsPage() {
                     >
                       {thumbUrl ? (
                         // eslint-disable-next-line @next/next/no-img-element
-                        <img src={thumbUrl} alt="" className="h-full w-full object-cover" />
+                        <img
+                          src={thumbUrl}
+                          alt=""
+                          className="h-full w-full object-cover"
+                        />
                       ) : (
                         "—"
                       )}
@@ -373,7 +387,9 @@ export default function AdminProductsPage() {
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
                         <div className="font-semibold">{p.product_no}</div>
-                        <div className="text-gray-600 truncate">{p.name ?? "(uten navn)"}</div>
+                        <div className="text-gray-600 truncate">
+                          {p.name ?? "(uten navn)"}
+                        </div>
                         <span
                           className={cn(
                             "text-xs rounded-full px-2 py-1 border",
@@ -386,8 +402,12 @@ export default function AdminProductsPage() {
                         </span>
                       </div>
 
-                      <div className="text-sm text-gray-600">{formatNok(p.list_price)}</div>
-                      <div className="text-xs text-gray-500 break-all">ID: {p.id}</div>
+                      <div className="text-sm text-gray-600">
+                        {formatNok(p.list_price)}
+                      </div>
+                      <div className="text-xs text-gray-500 break-all">
+                        ID: {p.id}
+                      </div>
                     </div>
                   </div>
 
