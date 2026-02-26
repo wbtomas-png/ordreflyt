@@ -1,10 +1,14 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { supabaseBrowser } from "@/lib/supabase/browser";
 
 export default function LoginPage() {
   const [busy, setBusy] = useState(false);
+  const sp = useSearchParams();
+
+  const err = useMemo(() => sp.get("e"), [sp]);
 
   async function signInGoogle() {
     setBusy(true);
@@ -27,24 +31,23 @@ export default function LoginPage() {
   return (
     <div className="min-h-screen bg-white flex items-center justify-center px-6">
       <div className="w-full max-w-md space-y-8">
-        {/* Logo / Brand */}
         <div className="text-center space-y-3">
-          <div className="text-3xl font-semibold tracking-tight">
-            OrderFlow
-          </div>
+          <div className="text-3xl font-semibold tracking-tight">OrderFlow</div>
           <p className="text-sm text-gray-600">
             Produktkatalog og bestillingssystem for intern bruk.
           </p>
         </div>
 
-        {/* Card */}
-        <div className="rounded-2xl border bg-white p-8 shadow-sm space-y-6">
+        <div className="rounded-2xl border bg-white p-8 shadow-sm space-y-4">
           <div className="space-y-2 text-center">
-            <h1 className="text-xl font-semibold">
-              Logg inn
-            </h1>
-
+            <h1 className="text-xl font-semibold">Logg inn</h1>
           </div>
+
+          {err ? (
+            <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+              Innlogging feilet: <span className="font-medium">{err}</span>
+            </div>
+          ) : null}
 
           <button
             disabled={busy}
@@ -55,7 +58,6 @@ export default function LoginPage() {
           </button>
         </div>
 
-        {/* Footer */}
         <div className="text-center text-xs text-gray-400">
           © {new Date().getFullYear()} OrderFlow
         </div>
