@@ -61,7 +61,10 @@ function tryCountFromUnknownShape(parsed: any): { qtySum: number; lines: number 
 
   // A) Array of items
   if (Array.isArray(parsed)) {
-    const qtySum = parsed.reduce((sum: number, it: any) => sum + (Number(it?.qty) || Number(it?.quantity) || 0), 0);
+    const qtySum = parsed.reduce(
+      (sum: number, it: any) => sum + (Number(it?.qty) || Number(it?.quantity) || 0),
+      0
+    );
     return { qtySum, lines: parsed.length };
   }
 
@@ -124,7 +127,9 @@ function detectCartCountFromStorage(): { count: number; key: string | null } {
     } else {
       if (count > best.count) best = { count, key };
       else if (count === best.count) {
-        const bestInfo = tryCountFromUnknownShape(safeParseJson<any>(window.localStorage.getItem(best.key)));
+        const bestInfo = tryCountFromUnknownShape(
+          safeParseJson<any>(window.localStorage.getItem(best.key))
+        );
         const bestLines = bestInfo?.lines ?? 0;
         const thisLines = info.lines ?? 0;
         if (thisLines > bestLines) best = { count, key };
@@ -135,30 +140,11 @@ function detectCartCountFromStorage(): { count: number; key: string | null } {
   return best ? { count: best.count, key: best.key } : { count: 0, key: null };
 }
 
-async function fetchSignedUrl(opts: {
-  token: string;
-  bucket: string;
-  path: string;
-  expires?: number;
-  download?: boolean;
-}) {
-  const qs = new URLSearchParams({
-    bucket: opts.bucket,
-    path: opts.path,
-    expires: String(opts.expires ?? 600),
-    ...(opts.download ? { download: "1" } : {}),
-  });
-
-  const res = await fetch(`/api/files/signed-url?${qs.toString()}`, {
-    method: "GET",
-    headers: { authorization: `Bearer ${opts.token}` },
-  });
-
-  const data = await res.json().catch(() => null);
-  if (!res.ok || !data?.ok) {
-    throw new Error(data?.error ?? `Signed URL failed (status ${res.status})`);
-  }
-  return data.url as string;
+function normalizeStoragePath(p: string) {
+  let s = p.trim();
+  if (s.startsWith("/")) s = s.slice(1);
+  if (s.startsWith("product-images/")) s = s.slice("product-images/".length);
+  return s;
 }
 
 export default function ProductsPage() {
@@ -222,21 +208,6 @@ export default function ProductsPage() {
     // cartKey med i deps så vi kan “narrow” storage filtering
   }, [cartKey]);
 
-  async function getFreshToken() {
-    const { data: sessRes, error: sessErr } = await supabase.auth.getSession();
-    if (sessErr) console.error(sessErr);
-
-    let token = sessRes.session?.access_token ?? null;
-
-    if (!token) {
-      const { data: refreshed, error: refreshErr } = await supabase.auth.refreshSession();
-      if (refreshErr) console.error(refreshErr);
-      token = refreshed.session?.access_token ?? null;
-    }
-
-    return token;
-  }
-
   useEffect(() => {
     let alive = true;
 
@@ -271,26 +242,20 @@ export default function ProductsPage() {
       const toFetch = paths.slice(0, 30);
 
       if (toFetch.length > 0) {
-        const token = await getFreshToken();
-        if (!token) {
-          console.warn("Missing token while fetching signed URLs. Signing out.");
-          await supabase.auth.signOut();
-          router.replace("/login");
-          return;
-        }
-
         const entries: Array<[string, string]> = [];
-        for (const storagePath of toFetch) {
+
+        for (const rawPath of toFetch) {
           try {
-            const url = await fetchSignedUrl({
-              token,
-              bucket: "product-images",
-              path: storagePath,
-              expires: 600,
-            });
-            entries.push([storagePath, url]);
+            const path = normalizeStoragePath(rawPath);
+
+            const { data, error } = await supabase.storage
+              .from("product-images")
+              .createSignedUrl(path, 600);
+
+            if (error) throw error;
+            if (data?.signedUrl) entries.push([rawPath, data.signedUrl]);
           } catch (e) {
-            console.warn("thumb signed-url failed for path:", storagePath, e);
+            console.warn("thumb signed-url failed for path:", rawPath, e);
           }
         }
 
@@ -314,9 +279,7 @@ export default function ProductsPage() {
   const filtered = useMemo(() => {
     const s = q.trim().toLowerCase();
     if (!s) return products;
-    return products.filter(
-      (p) => p.product_no.toLowerCase().includes(s) || p.name.toLowerCase().includes(s)
-    );
+    return products.filter((p) => p.product_no.toLowerCase().includes(s) || p.name.toLowerCase().includes(s));
   }, [q, products]);
 
   function addLineToCart(p: ProductRow) {
@@ -353,13 +316,8 @@ export default function ProductsPage() {
   if (!me?.ok) {
     return (
       <div className="p-6 space-y-3">
-        <div className="rounded-2xl border p-5 text-sm text-gray-700">
-          Du har ikke tilgang. Logg inn på nytt.
-        </div>
-        <button
-          className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50"
-          onClick={() => router.push("/login")}
-        >
+        <div className="rounded-2xl border p-5 text-sm text-gray-700">Du har ikke tilgang. Logg inn på nytt.</div>
+        <button className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50" onClick={() => router.push("/login")}>
           Til innlogging
         </button>
       </div>
@@ -373,10 +331,7 @@ export default function ProductsPage() {
         <div className="mx-auto max-w-5xl px-6 py-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-2">
-              <button
-                className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50"
-                onClick={() => router.push("/orders")}
-              >
+              <button className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50" onClick={() => router.push("/orders")}>
                 Mine ordrer
               </button>
 
@@ -392,7 +347,6 @@ export default function ProductsPage() {
                   <span className="hidden sm:inline">Handlevogn</span>
                 </span>
 
-                {/* Vis alltid badge (også 0) så du ser at den faktisk lever */}
                 <span
                   className={cn(
                     "absolute -right-2 -top-2",
@@ -440,11 +394,7 @@ export default function ProductsPage() {
 
             <div className="text-sm font-medium text-gray-700">
               Produkter ({filtered.length})
-              {myEmail ? (
-                <span className="ml-2 text-xs text-gray-400">
-                  {myEmail} · {myRole}
-                </span>
-              ) : null}
+              {myEmail ? <span className="ml-2 text-xs text-gray-400">{myEmail} · {myRole}</span> : null}
             </div>
           </div>
         </div>
@@ -475,8 +425,7 @@ export default function ProductsPage() {
         ) : (
           <ul className="space-y-2">
             {filtered.map((p) => {
-              const imgUrl =
-                p.thumb_path && thumbUrlByPath[p.thumb_path] ? thumbUrlByPath[p.thumb_path] : null;
+              const imgUrl = p.thumb_path && thumbUrlByPath[p.thumb_path] ? thumbUrlByPath[p.thumb_path] : null;
 
               return (
                 <li key={p.id}>
@@ -515,18 +464,10 @@ export default function ProductsPage() {
                               src={imgUrl}
                               alt={p.name}
                               loading="lazy"
-                              className={cn(
-                                "block object-cover",
-                                "transition-all duration-200",
-                                "h-10 w-10",
-                                "group-hover:h-14 group-hover:w-14"
-                              )}
-                              style={{ width: "auto", height: "auto" }}
+                              className={cn("block h-full w-full object-cover", "transition-all duration-200")}
                             />
                           ) : (
-                            <div className="flex h-full w-full items-center justify-center text-[10px] text-gray-400">
-                              —
-                            </div>
+                            <div className="flex h-full w-full items-center justify-center text-[10px] text-gray-400">—</div>
                           )}
                         </div>
                       </div>

@@ -14,7 +14,6 @@ function normEmail(s: unknown) {
 }
 
 function normName(s: unknown) {
-  // tillat tom streng (så kan vi bruke fallback), men trim whitespace
   return String(s ?? "").trim();
 }
 
@@ -25,22 +24,18 @@ function normRole(s: unknown): Role | null {
 }
 
 function isValidEmail(email: string) {
-  // enkel sjekk (ikke RFC), bra nok for allowlist
   return Boolean(email) && email.includes("@") && !email.includes(" ");
 }
 
 async function assertAdmin(req: Request) {
-  const pass = req.headers.get("x-admin-password") ?? "";
-  if (!pass || pass !== process.env.ACCESS_ADMIN_PASSWORD) {
-    return { ok: false as const, status: 401, error: "Bad admin password" };
-  }
-
+  // 1) Krev bearer token
   const auth = req.headers.get("authorization") ?? "";
   const token = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7) : "";
   if (!token) {
     return { ok: false as const, status: 401, error: "Missing bearer token" };
   }
 
+  // 2) Verifiser session hos Supabase (anon client kan lese bruker fra token)
   const anon = supabaseAnonServer();
   const { data: userRes, error: userErr } = await anon.auth.getUser(token);
 
@@ -48,6 +43,7 @@ async function assertAdmin(req: Request) {
     return { ok: false as const, status: 401, error: "Invalid session" };
   }
 
+  // 3) Sjekk at e-post er i admin-lista
   const email = normEmail(userRes.user.email);
   const admins = adminEmailSet();
   if (!admins.has(email)) {
@@ -98,7 +94,6 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "Invalid email" }, { status: 400 });
   }
 
-  // display_name kan være tom. Da kan UI bruke fallback til email senere.
   const svc = supabaseServiceServer();
   const { error } = await svc
     .from("allowed_emails")

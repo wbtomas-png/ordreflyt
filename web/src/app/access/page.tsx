@@ -1,7 +1,7 @@
 // file: web/src/app/access/page.tsx
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useRequireMe } from "@/lib/useRequireMe";
 import { supabaseBrowser } from "@/lib/supabase/browser";
@@ -28,10 +28,8 @@ export default function AccessPage() {
   const router = useRouter();
   const supabase = useMemo(() => supabaseBrowser(), []);
 
-  // Krev admin for å se/endre allowlist
+  // Krev admin for å se/endre allowlist (hooken redirecter ved feil rolle)
   const { me, loading } = useRequireMe({ requireRole: "admin" });
-
-  const [adminPass, setAdminPass] = useState<string>("");
 
   const [rows, setRows] = useState<Row[]>([]);
 
@@ -42,6 +40,7 @@ export default function AccessPage() {
 
   const [err, setErr] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   // inline edits
   const [roleDraftByEmail, setRoleDraftByEmail] = useState<Record<string, Role>>(
@@ -51,6 +50,11 @@ export default function AccessPage() {
     {}
   );
   const [savingEmail, setSavingEmail] = useState<string | null>(null);
+
+  function showToast(msg: string) {
+    setToast(msg);
+    window.setTimeout(() => setToast(null), 1200);
+  }
 
   async function authHeader(): Promise<string | null> {
     const { data } = await supabase.auth.getSession();
@@ -67,36 +71,38 @@ export default function AccessPage() {
       return;
     }
 
-    const res = await fetch("/api/admin/allowlist", {
-      method: "GET",
-      headers: {
-        authorization: auth,
-        "x-admin-password": adminPass, // (midlertidig, kan fjernes senere)
-      },
-    });
+    setBusy(true);
+    try {
+      const res = await fetch("/api/admin/allowlist", {
+        method: "GET",
+        headers: { authorization: auth },
+      });
 
-    const data = await res.json().catch(() => null);
-    if (!res.ok || !data?.ok) {
-      setErr(data?.error ?? `Load failed (${res.status})`);
-      setRows([]);
-      return;
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.ok) {
+        setErr(data?.error ?? `Load failed (${res.status})`);
+        setRows([]);
+        return;
+      }
+
+      const list = (data.rows ?? []) as Row[];
+      setRows(list);
+
+      // init drafts from server
+      setRoleDraftByEmail(() => {
+        const next: Record<string, Role> = {};
+        for (const r of list) next[r.email] = (r.role ?? "kunde") as Role;
+        return next;
+      });
+
+      setNameDraftByEmail(() => {
+        const next: Record<string, string> = {};
+        for (const r of list) next[r.email] = String(r.display_name ?? "");
+        return next;
+      });
+    } finally {
+      setBusy(false);
     }
-
-    const list = (data.rows ?? []) as Row[];
-    setRows(list);
-
-    // init drafts from server
-    setRoleDraftByEmail(() => {
-      const next: Record<string, Role> = {};
-      for (const r of list) next[r.email] = (r.role ?? "kunde") as Role;
-      return next;
-    });
-
-    setNameDraftByEmail(() => {
-      const next: Record<string, string> = {};
-      for (const r of list) next[r.email] = String(r.display_name ?? "");
-      return next;
-    });
   }
 
   async function addEmail() {
@@ -112,30 +118,32 @@ export default function AccessPage() {
     const n = displayName.trim();
     if (!e) return;
 
-    const res = await fetch("/api/admin/allowlist", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: auth,
-        "x-admin-password": adminPass,
-      },
-      body: JSON.stringify({ email: e, display_name: n, role: newRole }),
-    });
+    setBusy(true);
+    try {
+      const res = await fetch("/api/admin/allowlist", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: auth,
+        },
+        body: JSON.stringify({ email: e, display_name: n, role: newRole }),
+      });
 
-    const data = await res.json().catch(() => null);
-    if (!res.ok || !data?.ok) {
-      setErr(data?.error ?? `Add failed (${res.status})`);
-      return;
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.ok) {
+        setErr(data?.error ?? `Add failed (${res.status})`);
+        return;
+      }
+
+      setEmail("");
+      setDisplayName("");
+      setNewRole("kunde");
+
+      showToast("Lagt til");
+      await load();
+    } finally {
+      setBusy(false);
     }
-
-    setEmail("");
-    setDisplayName("");
-    setNewRole("kunde");
-
-    setToast("Lagt til");
-    setTimeout(() => setToast(null), 1200);
-
-    await load();
   }
 
   async function removeEmail(e: string) {
@@ -147,24 +155,27 @@ export default function AccessPage() {
       return;
     }
 
-    const res = await fetch(`/api/admin/allowlist?email=${encodeURIComponent(e)}`, {
-      method: "DELETE",
-      headers: {
-        authorization: auth,
-        "x-admin-password": adminPass,
-      },
-    });
+    setBusy(true);
+    try {
+      const res = await fetch(
+        `/api/admin/allowlist?email=${encodeURIComponent(e)}`,
+        {
+          method: "DELETE",
+          headers: { authorization: auth },
+        }
+      );
 
-    const data = await res.json().catch(() => null);
-    if (!res.ok || !data?.ok) {
-      setErr(data?.error ?? `Delete failed (${res.status})`);
-      return;
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.ok) {
+        setErr(data?.error ?? `Delete failed (${res.status})`);
+        return;
+      }
+
+      showToast("Fjernet");
+      await load();
+    } finally {
+      setBusy(false);
     }
-
-    setToast("Fjernet");
-    setTimeout(() => setToast(null), 1200);
-
-    await load();
   }
 
   async function saveRow(email: string) {
@@ -180,36 +191,42 @@ export default function AccessPage() {
     const display_name = (nameDraftByEmail[email] ?? "").trim();
 
     setSavingEmail(email);
+    try {
+      const res = await fetch("/api/admin/allowlist", {
+        method: "PATCH",
+        headers: {
+          "content-type": "application/json",
+          authorization: auth,
+        },
+        body: JSON.stringify({ email, role, display_name }),
+      });
 
-    const res = await fetch("/api/admin/allowlist", {
-      method: "PATCH",
-      headers: {
-        "content-type": "application/json",
-        authorization: auth,
-        "x-admin-password": adminPass,
-      },
-      body: JSON.stringify({ email, role, display_name }),
-    });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.ok) {
+        setErr(data?.error ?? `Update failed (${res.status})`);
+        return;
+      }
 
-    const data = await res.json().catch(() => null);
-    setSavingEmail(null);
-
-    if (!res.ok || !data?.ok) {
-      setErr(data?.error ?? `Update failed (${res.status})`);
-      return;
+      showToast("Oppdatert");
+      await load();
+    } finally {
+      setSavingEmail(null);
     }
-
-    setToast("Oppdatert");
-    setTimeout(() => setToast(null), 1200);
-
-    await load();
   }
+
+  // Auto-load når admin er verifisert
+  useEffect(() => {
+    if (loading) return;
+    if (!me) return;
+    void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, me]);
 
   if (loading) {
     return <div className="p-6 text-sm text-gray-600">Laster…</div>;
   }
 
-  // Hooken redirecter allerede ved feil rolle, så her er vi admin
+  // Hooken redirecter ved feil rolle, så her er vi admin
   const canUse = Boolean(me);
 
   return (
@@ -237,29 +254,27 @@ export default function AccessPage() {
 
       <div className="mx-auto max-w-3xl p-6 space-y-4">
         <div className="rounded-2xl border p-5 space-y-3">
-          <div className="text-sm font-semibold">Admin-passord</div>
-          <div className="flex gap-2">
-            <input
-              type="password"
-              value={adminPass}
-              onChange={(e) => setAdminPass(e.target.value)}
-              placeholder="Skriv admin-passord…"
-              className="w-full rounded-xl border px-3 py-2 text-sm outline-none focus:border-gray-400"
-            />
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-sm font-semibold">Allowlist</div>
             <button
               onClick={load}
-              disabled={!canUse}
+              disabled={!canUse || busy}
               className={cn(
-                "rounded-xl border border-black bg-black px-4 py-2 text-sm font-semibold text-white",
-                "hover:opacity-90 disabled:opacity-50"
+                "rounded-xl border px-4 py-2 text-sm",
+                "hover:bg-gray-50 disabled:opacity-50"
               )}
+              title="Oppdater liste"
             >
-              Åpne
+              {busy ? "Oppdaterer…" : "Oppdater"}
             </button>
           </div>
 
           {err ? <div className="text-sm text-red-600">{err}</div> : null}
           {toast ? <div className="text-sm text-green-700">{toast}</div> : null}
+
+          <div className="text-xs text-gray-500">
+            Kun admin-brukere har tilgang til denne siden. Ingen ekstra passord brukes.
+          </div>
         </div>
 
         <div className="rounded-2xl border p-5 space-y-3">
@@ -293,14 +308,16 @@ export default function AccessPage() {
 
             <button
               onClick={addEmail}
-              className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50"
+              disabled={!canUse || busy}
+              className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50 disabled:opacity-50"
             >
               Legg til
             </button>
           </div>
 
           <div className="text-xs text-gray-500">
-            Brukernavn vises i systemet (audit / “sist endret”). E-post brukes som fallback hvis navn er tomt.
+            Brukernavn vises i systemet (audit / “sist endret”). E-post brukes som
+            fallback hvis navn er tomt.
           </div>
         </div>
 
@@ -308,7 +325,7 @@ export default function AccessPage() {
           <div className="text-sm font-semibold mb-3">Allowlist ({rows.length})</div>
 
           {rows.length === 0 ? (
-            <div className="text-sm text-gray-600">Ingen e-poster (eller ikke åpnet).</div>
+            <div className="text-sm text-gray-600">Ingen e-poster.</div>
           ) : (
             <ul className="space-y-2">
               {rows.map((r) => {
@@ -357,6 +374,7 @@ export default function AccessPage() {
                         <button
                           className="rounded-lg border px-3 py-2 text-xs hover:bg-gray-50"
                           onClick={() => removeEmail(r.email)}
+                          disabled={saving}
                           title="Fjern"
                         >
                           Fjern
