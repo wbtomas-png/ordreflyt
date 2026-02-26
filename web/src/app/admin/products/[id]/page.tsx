@@ -385,10 +385,10 @@ const ok = role === "ADMIN";
     };
 
     const { error } = await supabase
-      .from("products")
-      .update(patch)
-      .eq("id", product.id);
-
+  .from("products" as any)
+  .update(patch as any)
+  .eq("id", product.id);
+  
     setSavingProduct(false);
 
     if (error) {
