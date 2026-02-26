@@ -1,41 +1,44 @@
 // file: web/src/app/auth/callback/route.ts
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { createServerClient } from "@supabase/ssr";
+import { createRouteHandlerClient } from "@supabase/auth-helpers-nextjs";
 
-export async function GET(req: Request) {
-  const url = new URL(req.url);
-  const code = url.searchParams.get("code");
+export async function GET(request: Request) {
+  const url = new URL(request.url);
+  const next = url.searchParams.get("next") || "/products";
 
-  if (code) {
-    const cookieStore = cookies();
+  // NB: cookies() kan være async i Next 15/16
+  const cookieStore = await cookies();
 
-    const supabase = createServerClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-      {
-        cookies: {
-          get(name: string) {
-            return cookieStore.get(name)?.value;
-          },
-          set(name: string, value: string, options: any) {
-            cookieStore.set({ name, value, ...options });
-          },
-          remove(name: string, options: any) {
-            cookieStore.set({ name, value: "", ...options, maxAge: 0 });
-          },
+  const supabase = createRouteHandlerClient(
+    {
+      cookies: {
+        get(name: string) {
+          return cookieStore.get(name)?.value;
         },
-      }
-    );
-
-    const { error } = await supabase.auth.exchangeCodeForSession(code);
-    if (error) {
-      return NextResponse.redirect(
-        new URL(`/login?error=${encodeURIComponent(error.message)}`, url)
-      );
+        set(name: string, value: string, options: any) {
+          cookieStore.set({ name, value, ...options });
+        },
+        remove(name: string, options: any) {
+          cookieStore.set({ name, value: "", ...options, maxAge: 0 });
+        },
+      },
+    },
+    {
+      // valgfritt: hvis du kjører med env via NEXT_PUBLIC_SUPABASE_URL/ANON_KEY,
+      // så trenger du ikke sette noe her.
     }
+  );
+
+  // Denne gjør PKCE exchange og lagrer session i cookies
+  const { error } = await supabase.auth.exchangeCodeForSession(url.toString());
+
+  if (error) {
+    // Send tilbake til login med en liten feilmelding i URL
+    const loginUrl = new URL("/login", url.origin);
+    loginUrl.searchParams.set("error", error.message);
+    return NextResponse.redirect(loginUrl);
   }
 
-  // etter login:
-  return NextResponse.redirect(new URL("/products", url));
+  return NextResponse.redirect(new URL(next, url.origin));
 }
