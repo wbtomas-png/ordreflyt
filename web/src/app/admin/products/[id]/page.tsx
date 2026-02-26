@@ -384,11 +384,11 @@ const ok = role === "ADMIN";
       is_active: isActive,
     };
 
-    const { error } = await supabase
-  .from("products" as any)
-  .update(patch as any)
+        const { error } = await (supabase as any)
+  .from("products")
+  .update(patch)
   .eq("id", product.id);
-  
+
     setSavingProduct(false);
 
     if (error) {
