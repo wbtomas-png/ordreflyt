@@ -402,8 +402,10 @@ export default function ProductDetailsPage() {
       relation_type: addType,
     };
 
-    const { error } = await supabase.from("product_relations").insert(payload);
-
+const { error } = await (supabase as any)
+  .from("product_relations")
+  .insert(payload as any);
+  
     if (error) {
       console.error("product_relations insert failed:", error, payload);
       alert(error.message);
