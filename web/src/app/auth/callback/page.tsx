@@ -1,21 +1,23 @@
-// file: web/src/app/auth/callback/page.tsx
+import { NextResponse } from "next/server";
+import { supabaseServer } from "@/lib/supabase/server";
 
-import { Suspense } from "react";
-import AuthCallbackClient from "./AuthCallbackClient";
+export async function GET(request: Request) {
+  const url = new URL(request.url);
+  const code = url.searchParams.get("code");
 
-// Viktig: dette hindrer at Next prøver å prerendere siden under build
-export const dynamic = "force-dynamic";
+  if (!code) {
+    return NextResponse.redirect(new URL("/login", url.origin));
+  }
 
-export default function AuthCallbackPage() {
-  return (
-    <div className="min-h-screen bg-white flex items-center justify-center px-6">
-      <div className="w-full max-w-md rounded-2xl border bg-white p-8 shadow-sm space-y-3">
-        <div className="text-lg font-semibold">OrderFlow</div>
+  const supabase = await supabaseServer();
 
-        <Suspense fallback={<p className="text-sm text-gray-600">Fullfører innlogging…</p>}>
-          <AuthCallbackClient />
-        </Suspense>
-      </div>
-    </div>
-  );
+  const { error } = await supabase.auth.exchangeCodeForSession(code);
+
+  if (error) {
+    const to = new URL("/login", url.origin);
+    to.searchParams.set("err", "oauth_failed");
+    return NextResponse.redirect(to);
+  }
+
+  return NextResponse.redirect(new URL("/products", url.origin));
 }
