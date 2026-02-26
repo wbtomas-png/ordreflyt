@@ -222,7 +222,7 @@ export default function AdminProductDetailsPage() {
 const { data: prof, error: profErr } = (await supabase
   .from("profiles" as any)
   .select("role")
-  .eq("user_id", user.id)
+  .eq("user_id", auth.user.id)
   .maybeSingle()) as { data: ProfileRoleRow | null; error: any };
 
 if (profErr) console.error(profErr);
