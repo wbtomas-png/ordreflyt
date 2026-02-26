@@ -2,7 +2,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { supabaseBrowser } from "@/lib/supabase/browser";
 import { addToCart } from "@/lib/cart";
 
@@ -34,6 +34,10 @@ type LinkedRow = {
   link_id: string;
   link_type: "SPARE_PART" | "ACCESSORY";
   product: ProductRow;
+};
+
+type ProfileRoleRow = {
+  role: string | null;
 };
 
 function formatNok(value: number | null) {
@@ -88,6 +92,7 @@ async function fetchSignedUrl(opts: {
 export default function ProductDetailsPage() {
   const router = useRouter();
   const params = useParams<{ id: string }>();
+  const sp = useSearchParams(); // (valgfritt) hvis du vil bruke query senere
   const supabase = useMemo(() => supabaseBrowser(), []);
 
   const [loading, setLoading] = useState(true);
@@ -112,6 +117,54 @@ export default function ProductDetailsPage() {
   const [thumbUrl, setThumbUrl] = useState<string | null>(null);
   const [accessToken, setAccessToken] = useState<string | null>(null);
 
+  async function refreshLinked(productId: string) {
+    const { data: links, error: linksErr } = await supabase
+      .from("product_relations")
+      .select("id, relation_type, related_product_id")
+      .eq("product_id", productId)
+      .order("created_at", { ascending: false });
+
+    if (linksErr) {
+      console.error("product_relations select failed:", linksErr);
+      setLinked([]);
+      return;
+    }
+
+    const ids = (links ?? []).map((x: any) => x.related_product_id);
+    if (ids.length === 0) {
+      setLinked([]);
+      return;
+    }
+
+    const { data: prods, error: prodsErr } = await supabase
+      .from("products")
+      .select("id, product_no, name, list_price, thumb_path, is_active")
+      .in("id", ids);
+
+    if (prodsErr) {
+      console.error("linked products select failed:", prodsErr);
+      setLinked([]);
+      return;
+    }
+
+    const byId = new Map<string, ProductRow>();
+    (prods ?? []).forEach((p: any) => byId.set(p.id, p as ProductRow));
+
+    const rows: LinkedRow[] = (links ?? [])
+      .map((l: any) => {
+        const p = byId.get(l.related_product_id);
+        if (!p) return null;
+        return {
+          link_id: l.id,
+          link_type: l.relation_type as LinkedRow["link_type"],
+          product: p,
+        } as LinkedRow;
+      })
+      .filter(Boolean) as LinkedRow[];
+
+    setLinked(rows);
+  }
+
   useEffect(() => {
     let alive = true;
 
@@ -135,14 +188,15 @@ export default function ProductDetailsPage() {
       const id = params.id;
 
       // Rolle (for å vise "koble til" UI kun for admin/purchaser)
-      const { data: prof, error: pErr } = await supabase
-        .from("profiles")
+      // NB: profiles kan bli `never` dersom tabellen ikke er i Database-typene → cast kontrollert.
+      const { data: prof, error: pErr } = (await supabase
+        .from("profiles" as any)
         .select("role")
         .eq("user_id", userRes.user.id)
-        .maybeSingle();
+        .maybeSingle()) as { data: ProfileRoleRow | null; error: any };
 
       if (pErr) console.warn("profiles role lookup failed:", pErr);
-      if (alive) setRole((prof as any)?.role ?? null);
+      if (alive) setRole(prof?.role ?? null);
 
       // Produkt
       const { data: prod, error: prodErr } = await supabase
@@ -204,13 +258,11 @@ export default function ProductDetailsPage() {
         const list = (fileRows ?? []) as ProductFileRow[];
         setFiles(list);
 
-        // Signed URLs for docs (bucket: product-files) — hent alle i ett sveip
         const uniquePaths = Array.from(
           new Set(list.map((x) => x.relative_path).filter(Boolean))
         ) as string[];
 
         const entries: Array<[string, string]> = [];
-
         for (const storagePath of uniquePaths) {
           try {
             const u = await fetchSignedUrl({
@@ -226,9 +278,9 @@ export default function ProductDetailsPage() {
           }
         }
 
-        if (alive && entries.length > 0) {
-          setFileUrlByPath((prev) => {
-            const next = { ...prev };
+        if (alive) {
+          setFileUrlByPath(() => {
+            const next: Record<string, string> = {};
             for (const [p, u] of entries) next[p] = u;
             return next;
           });
@@ -253,13 +305,11 @@ export default function ProductDetailsPage() {
         const list = (imgRows ?? []) as ProductImageRow[];
         setImages(list);
 
-        // Signed URLs for images (bucket: product-images)
         const uniqueImgPaths = Array.from(
           new Set(list.map((x) => x.storage_path).filter(Boolean))
         ) as string[];
 
         const imgEntries: Array<[string, string]> = [];
-
         for (const storagePath of uniqueImgPaths) {
           try {
             const u = await fetchSignedUrl({
@@ -274,16 +324,16 @@ export default function ProductDetailsPage() {
           }
         }
 
-        if (alive && imgEntries.length > 0) {
-          setImgUrlByPath((prev) => {
-            const next = { ...prev };
+        if (alive) {
+          setImgUrlByPath(() => {
+            const next: Record<string, string> = {};
             for (const [p, u] of imgEntries) next[p] = u;
             return next;
           });
         }
       }
 
-      // Koblinger (reservedeler/ekstrautstyr)
+      // Koblinger
       await refreshLinked(id);
 
       if (!alive) return;
@@ -294,55 +344,7 @@ export default function ProductDetailsPage() {
       alive = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [params.id, router, supabase]);
-
-  async function refreshLinked(productId: string) {
-    const { data: links, error: linksErr } = await supabase
-      .from("product_relations")
-      .select("id, relation_type, related_product_id")
-      .eq("product_id", productId)
-      .order("created_at", { ascending: false });
-
-    if (linksErr) {
-      console.error("product_relations select failed:", linksErr);
-      setLinked([]);
-      return;
-    }
-
-    const ids = (links ?? []).map((x: any) => x.related_product_id);
-    if (ids.length === 0) {
-      setLinked([]);
-      return;
-    }
-
-    const { data: prods, error: prodsErr } = await supabase
-      .from("products")
-      .select("id, product_no, name, list_price, thumb_path, is_active")
-      .in("id", ids);
-
-    if (prodsErr) {
-      console.error("linked products select failed:", prodsErr);
-      setLinked([]);
-      return;
-    }
-
-    const byId = new Map<string, ProductRow>();
-    (prods ?? []).forEach((p: any) => byId.set(p.id, p as ProductRow));
-
-    const rows: LinkedRow[] = (links ?? [])
-      .map((l: any) => {
-        const p = byId.get(l.related_product_id);
-        if (!p) return null;
-        return {
-          link_id: l.id,
-          link_type: l.relation_type as LinkedRow["link_type"],
-          product: p,
-        } as LinkedRow;
-      })
-      .filter(Boolean) as LinkedRow[];
-
-    setLinked(rows);
-  }
+  }, [params.id, router, supabase, sp]);
 
   async function onAddProductToCart(p: ProductRow) {
     addToCart(
@@ -397,7 +399,7 @@ export default function ProductDetailsPage() {
     const payload = {
       product_id: product.id,
       related_product_id: target.id,
-      relation_type: addType, // "ACCESSORY" | "SPARE_PART"
+      relation_type: addType,
     };
 
     const { error } = await supabase.from("product_relations").insert(payload);
@@ -723,8 +725,8 @@ export default function ProductDetailsPage() {
                 )}
 
                 <div className="text-xs text-gray-600">
-                  (Denne koblingen er data i databasen – så alle brukere ser samme
-                  oppsett.)
+                  (Denne koblingen er data i databasen – så alle brukere ser
+                  samme oppsett.)
                 </div>
 
                 {process.env.NODE_ENV !== "production" && (
