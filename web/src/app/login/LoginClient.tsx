@@ -1,51 +1,189 @@
 // file: web/src/app/login/LoginClient.tsx
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { supabaseBrowser } from "@/lib/supabase/browser";
 
+function safeJson(x: unknown) {
+  try {
+    return JSON.stringify(x, null, 2);
+  } catch {
+    return String(x);
+  }
+}
+
+function lsKeys(prefix?: string) {
+  try {
+    const keys = Object.keys(window.localStorage || {});
+    return prefix ? keys.filter((k) => k.toLowerCase().includes(prefix.toLowerCase())) : keys;
+  } catch {
+    return [];
+  }
+}
+
+function ssKeys(prefix?: string) {
+  try {
+    const keys = Object.keys(window.sessionStorage || {});
+    return prefix ? keys.filter((k) => k.toLowerCase().includes(prefix.toLowerCase())) : keys;
+  } catch {
+    return [];
+  }
+}
+
+function logAuthState(where: string) {
+  // eslint-disable-next-line no-console
+  console.groupCollapsed(`[auth][${where}] state`);
+  try {
+    // eslint-disable-next-line no-console
+    console.log("origin:", window.location.origin);
+    // eslint-disable-next-line no-console
+    console.log("href:", window.location.href);
+    // eslint-disable-next-line no-console
+    console.log("pathname:", window.location.pathname);
+    // eslint-disable-next-line no-console
+    console.log("search:", window.location.search);
+    // eslint-disable-next-line no-console
+    console.log("hash:", window.location.hash);
+    // eslint-disable-next-line no-console
+    console.log("referrer:", document.referrer);
+    // eslint-disable-next-line no-console
+    console.log("userAgent:", navigator.userAgent);
+    // eslint-disable-next-line no-console
+    console.log("localStorage keys:", lsKeys());
+    // eslint-disable-next-line no-console
+    console.log("sessionStorage keys:", ssKeys());
+    // Useful to see whether Supabase wrote PKCE verifier-like entries
+    // eslint-disable-next-line no-console
+    console.log("localStorage keys (supabase):", lsKeys("supabase"));
+    // eslint-disable-next-line no-console
+    console.log("sessionStorage keys (supabase):", ssKeys("supabase"));
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.log("logAuthState error:", e);
+  }
+  // eslint-disable-next-line no-console
+  console.groupEnd();
+}
+
 export default function LoginClient() {
   const [busy, setBusy] = useState(false);
-  const sp = useSearchParams();
+  const [busyProvider, setBusyProvider] = useState<"google" | "azure" | null>(null);
 
+  const sp = useSearchParams();
   const cb = sp.get("cb");
   const detail = sp.get("detail");
 
-  async function signInGoogle() {
+  const redirectTo = useMemo(() => {
+    // IMPORTANT: must be same-origin as where login is initiated (PKCE verifier stored per origin)
+    if (typeof window === "undefined") return "/auth/callback";
+    return `${window.location.origin}/auth/callback`;
+  }, []);
+
+  useEffect(() => {
+    // Page-load diagnostics
+    logAuthState("login:mount");
+
+    // Detect common mismatch early (prod domain vs preview domain)
+    try {
+      const host = window.location.hostname;
+      const isVercelPreview = host.includes("-") && host.endsWith(".vercel.app");
+      const isProdVercel = host === "ordreflyt.vercel.app";
+      // eslint-disable-next-line no-console
+      console.log("[login] host:", host, { isVercelPreview, isProdVercel });
+    } catch {}
+
+    // Log cb/detail from query for correlation
+    // eslint-disable-next-line no-console
+    console.log("[login] cb/detail:", { cb, detail });
+
+    // If a hash token is present, it means you're being redirected back with implicit tokens (not PKCE code).
+    // We log it, not consume it here (callback should handle session).
+    // eslint-disable-next-line no-console
+    if (typeof window !== "undefined" && window.location.hash) {
+      console.log("[login] hash present (possible implicit flow):", window.location.hash.slice(0, 200) + "…");
+    }
+  }, [cb, detail]);
+
+  async function signIn(provider: "google" | "azure") {
     setBusy(true);
+    setBusyProvider(provider);
+
     const supabase = supabaseBrowser();
 
-    const { error } = await supabase.auth.signInWithOAuth({
-  provider: "google",
-  options: {
-    redirectTo: `${window.location.origin}/auth/callback`,
-  },
-});
+    try {
+      logAuthState(`login:before:${provider}`);
 
-    if (error) {
-      console.error(error);
-      alert(error.message);
+      // eslint-disable-next-line no-console
+      console.log("[login] redirectTo:", redirectTo);
+
+      // snapshot storage keys before
+      const lsBefore = lsKeys("supabase");
+      const ssBefore = ssKeys("supabase");
+
+      const { data, error } = await supabase.auth.signInWithOAuth({
+        provider: provider === "google" ? "google" : "azure",
+        options: {
+          redirectTo,
+          // These can help for debugging; leave as defaults otherwise
+          // queryParams: { prompt: "consent" },
+        },
+      });
+
+      // eslint-disable-next-line no-console
+      console.log("[login] signInWithOAuth data:", data);
+      // eslint-disable-next-line no-console
+      console.log("[login] signInWithOAuth error:", error);
+
+      // snapshot storage keys after
+      const lsAfter = lsKeys("supabase");
+      const ssAfter = ssKeys("supabase");
+
+      // eslint-disable-next-line no-console
+      console.groupCollapsed("[login] storage diff (supabase)");
+      // eslint-disable-next-line no-console
+      console.log("localStorage before:", lsBefore);
+      // eslint-disable-next-line no-console
+      console.log("localStorage after :", lsAfter);
+      // eslint-disable-next-line no-console
+      console.log("sessionStorage before:", ssBefore);
+      // eslint-disable-next-line no-console
+      console.log("sessionStorage after :", ssAfter);
+      // eslint-disable-next-line no-console
+      console.groupEnd();
+
+      // Also log current session immediately (often null before redirect; still useful)
+      const sess = await supabase.auth.getSession();
+      // eslint-disable-next-line no-console
+      console.log("[login] getSession after signInWithOAuth:", safeJson(sess.data?.session ? { hasSession: true } : { hasSession: false }));
+
+      if (error) {
+        alert(error.message);
+        setBusy(false);
+        setBusyProvider(null);
+        return;
+      }
+
+      // IMPORTANT:
+      // On success, Supabase will redirect the browser away.
+      // If it doesn't, something prevented navigation (popup blocker etc.)
+      // eslint-disable-next-line no-console
+      console.log("[login] OAuth initiated. Browser should redirect now.");
+    } catch (e: any) {
+      // eslint-disable-next-line no-console
+      console.error("[login] signIn exception:", e);
+      alert(e?.message ? String(e.message) : "Ukjent feil ved innlogging.");
       setBusy(false);
+      setBusyProvider(null);
     }
   }
 
+  async function signInGoogle() {
+    await signIn("google");
+  }
+
   async function signInMicrosoft() {
-    setBusy(true);
-    const supabase = supabaseBrowser();
-
-    const { error } = await supabase.auth.signInWithOAuth({
-      provider: "azure",
-      options: {
-        redirectTo: `${window.location.origin}/auth/callback`,
-      },
-    });
-
-    if (error) {
-      console.error(error);
-      alert(error.message);
-      setBusy(false);
-    }
+    await signIn("azure");
   }
 
   return (
@@ -59,17 +197,32 @@ export default function LoginClient() {
         </div>
 
         {/* DEBUG/FEILVISNING */}
-        {cb && (
+        {(cb || detail) && (
           <div className="rounded-xl border bg-red-50 p-4 text-sm text-red-800">
             <div className="font-semibold">Innlogging stoppet</div>
-            <div className="mt-1">
-              <span className="font-medium">Steg:</span> {cb}
-            </div>
-            {detail && (
+            {cb ? (
+              <div className="mt-1">
+                <span className="font-medium">Steg:</span> {cb}
+              </div>
+            ) : null}
+            {detail ? (
               <div className="mt-1 break-words">
                 <span className="font-medium">Detaljer:</span> {detail}
               </div>
-            )}
+            ) : null}
+
+            <div className="mt-3 text-xs text-red-700 space-y-1">
+              <div>
+                <span className="font-medium">Origin:</span>{" "}
+                {typeof window !== "undefined" ? window.location.origin : ""}
+              </div>
+              <div className="break-words">
+                <span className="font-medium">RedirectTo:</span> {redirectTo}
+              </div>
+              <div className="text-[11px] leading-4 text-red-700">
+                Sjekk Console for full logg (origin, redirect, storage keys, hash/search).
+              </div>
+            </div>
           </div>
         )}
 
@@ -83,7 +236,7 @@ export default function LoginClient() {
             onClick={signInGoogle}
             className="w-full rounded-xl border border-black bg-black px-4 py-3 text-sm font-medium text-white transition hover:opacity-90 disabled:opacity-50"
           >
-            {busy ? "Sender deg videre…" : "Logg inn med Google"}
+            {busy && busyProvider === "google" ? "Sender deg videre…" : "Logg inn med Google"}
           </button>
 
           <button
@@ -91,8 +244,13 @@ export default function LoginClient() {
             onClick={signInMicrosoft}
             className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm font-medium text-black transition hover:bg-gray-50 disabled:opacity-50"
           >
-            {busy ? "Sender deg videre…" : "Logg inn med Microsoft"}
+            {busy && busyProvider === "azure" ? "Sender deg videre…" : "Logg inn med Microsoft"}
           </button>
+
+          {/* Always-on debug hint */}
+          <div className="pt-2 text-xs text-gray-500">
+            Debug: åpne DevTools Console. Vi logger origin, redirectTo, search/hash, storage keys og Supabase-respons.
+          </div>
         </div>
 
         <div className="text-center text-xs text-gray-400">
