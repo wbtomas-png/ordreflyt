@@ -1,6 +1,6 @@
-// file: web/src/app/auth/callback/AuthCallbackClient.tsx
 "use client";
 
+// file: web/src/app/auth/callback/AuthCallbackClient.tsx
 import { useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { supabaseBrowser } from "@/lib/supabase/browser";
@@ -16,7 +16,6 @@ export default function AuthCallbackClient() {
     let alive = true;
 
     const code = sp.get("code");
-
     if (!code) {
       setMsg("Mangler auth-kode. Sender deg til login…");
       setTimeout(() => router.replace("/login"), 800);
@@ -43,5 +42,5 @@ export default function AuthCallbackClient() {
     };
   }, [router, sp, supabase]);
 
-  return <p className="mt-3 text-sm text-gray-600">{msg}</p>;
+  return <p className="text-sm text-gray-600">{msg}</p>;
 }
