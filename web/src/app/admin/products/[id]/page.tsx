@@ -217,16 +217,18 @@ export default function AdminProductDetailsPage() {
         return;
       }
 
-      const { data: prof, error: profErr } = await supabase
-        .from("profiles")
-        .select("role")
-        .eq("user_id", auth.user.id)
-        .maybeSingle();
+      type ProfileRoleRow = { role: string | null };
 
-      if (profErr) console.error(profErr);
+const { data: prof, error: profErr } = (await supabase
+  .from("profiles" as any)
+  .select("role")
+  .eq("user_id", user.id)
+  .maybeSingle()) as { data: ProfileRoleRow | null; error: any };
 
-      const role = (prof?.role ?? "").toString().toUpperCase();
-      const ok = role === "ADMIN";
+if (profErr) console.error(profErr);
+
+const role = String(prof?.role ?? "").toUpperCase();
+const ok = role === "ADMIN";
       if (!alive) return;
 
       setRoleOk(ok);
