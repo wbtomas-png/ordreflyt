@@ -336,7 +336,8 @@ const ok = role === "ADMIN";
 
         if (error) throw error;
 
-        const filtered = (data ?? []).filter((x) => x.id !== productId);
+        const rows = ((data ?? []) as unknown) as ProductRow[];
+        const filtered = rows.filter((x) => x.id !== productId);
         if (!alive) return;
 
         setRelCandidates(filtered as ProductRow[]);
