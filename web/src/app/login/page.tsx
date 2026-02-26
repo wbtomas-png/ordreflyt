@@ -1,29 +1,35 @@
+// file: web/src/app/login/page.tsx
 "use client";
 
-import { useMemo, useState } from "react";
-import { useSearchParams } from "next/navigation";
-import { supabaseBrowser } from "@/lib/supabase/browser";
+export const dynamic = "force-dynamic"; // hindrer prerender under build
+
+import { useState } from "react";
 
 export default function LoginPage() {
   const [busy, setBusy] = useState(false);
-  const sp = useSearchParams();
-
-  const err = useMemo(() => sp.get("e"), [sp]);
 
   async function signInGoogle() {
     setBusy(true);
-    const supabase = supabaseBrowser();
+    try {
+      // Lazy import -> hindrer at supabase/browser evalueres under build/prerender
+      const { supabaseBrowser } = await import("@/lib/supabase/browser");
+      const supabase = supabaseBrowser();
 
-    const { error } = await supabase.auth.signInWithOAuth({
-      provider: "google",
-      options: {
-        redirectTo: `${window.location.origin}/auth/callback`,
-      },
-    });
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: "google",
+        options: {
+          redirectTo: `${window.location.origin}/auth/callback`,
+        },
+      });
 
-    if (error) {
-      console.error(error);
-      alert(error.message);
+      if (error) {
+        console.error(error);
+        alert(error.message);
+        setBusy(false);
+      }
+    } catch (e) {
+      console.error(e);
+      alert("Innlogging feilet (klient). Sjekk console/logs.");
       setBusy(false);
     }
   }
@@ -38,16 +44,10 @@ export default function LoginPage() {
           </p>
         </div>
 
-        <div className="rounded-2xl border bg-white p-8 shadow-sm space-y-4">
+        <div className="rounded-2xl border bg-white p-8 shadow-sm space-y-6">
           <div className="space-y-2 text-center">
             <h1 className="text-xl font-semibold">Logg inn</h1>
           </div>
-
-          {err ? (
-            <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-              Innlogging feilet: <span className="font-medium">{err}</span>
-            </div>
-          ) : null}
 
           <button
             disabled={busy}
