@@ -2,10 +2,11 @@
 
 import { NextResponse } from "next/server";
 import {
-  adminEmailSet,
   supabaseAnonServer,
   supabaseServiceServer,
 } from "@/lib/supabase/server-clients";
+
+export const runtime = "nodejs";
 
 type Role = "kunde" | "admin" | "innkjøper";
 
@@ -14,6 +15,7 @@ function normEmail(s: unknown) {
 }
 
 function normName(s: unknown) {
+  // tillat tom streng (så UI kan bruke fallback), men trim whitespace
   return String(s ?? "").trim();
 }
 
@@ -24,6 +26,7 @@ function normRole(s: unknown): Role | null {
 }
 
 function isValidEmail(email: string) {
+  // enkel sjekk (ikke RFC), bra nok for allowlist
   return Boolean(email) && email.includes("@") && !email.includes(" ");
 }
 
@@ -35,7 +38,7 @@ async function assertAdmin(req: Request) {
     return { ok: false as const, status: 401, error: "Missing bearer token" };
   }
 
-  // 2) Verifiser session hos Supabase (anon client kan lese bruker fra token)
+  // 2) Valider session og hent e-post
   const anon = supabaseAnonServer();
   const { data: userRes, error: userErr } = await anon.auth.getUser(token);
 
@@ -43,10 +46,21 @@ async function assertAdmin(req: Request) {
     return { ok: false as const, status: 401, error: "Invalid session" };
   }
 
-  // 3) Sjekk at e-post er i admin-lista
   const email = normEmail(userRes.user.email);
-  const admins = adminEmailSet();
-  if (!admins.has(email)) {
+
+  // 3) Sjekk admin i DB (source of truth)
+  const svc = supabaseServiceServer();
+  const { data: row, error } = await svc
+    .from("allowed_emails")
+    .select("role")
+    .eq("email", email)
+    .maybeSingle();
+
+  if (error) {
+    return { ok: false as const, status: 500, error: error.message };
+  }
+
+  if (!row || row.role !== "admin") {
     return { ok: false as const, status: 403, error: "Not an admin" };
   }
 
