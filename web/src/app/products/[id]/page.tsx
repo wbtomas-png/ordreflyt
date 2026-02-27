@@ -40,6 +40,10 @@ type ProfileRoleRow = {
   role: string | null;
 };
 
+function cn(...classes: Array<string | false | null | undefined>) {
+  return classes.filter(Boolean).join(" ");
+}
+
 function formatNok(value: number | null) {
   if (value == null) return "—";
   return new Intl.NumberFormat("nb-NO", {
@@ -92,16 +96,14 @@ async function fetchSignedUrl(opts: {
 export default function ProductDetailsPage() {
   const router = useRouter();
   const params = useParams<{ id: string }>();
-  const sp = useSearchParams(); // (valgfritt) hvis du vil bruke query senere
+  const sp = useSearchParams();
   const supabase = useMemo(() => supabaseBrowser(), []);
 
   const [loading, setLoading] = useState(true);
   const [product, setProduct] = useState<ProductRow | null>(null);
 
   const [files, setFiles] = useState<ProductFileRow[]>([]);
-  const [fileUrlByPath, setFileUrlByPath] = useState<Record<string, string>>(
-    {}
-  );
+  const [fileUrlByPath, setFileUrlByPath] = useState<Record<string, string>>({});
 
   const [images, setImages] = useState<ProductImageRow[]>([]);
   const [imgUrlByPath, setImgUrlByPath] = useState<Record<string, string>>({});
@@ -116,6 +118,10 @@ export default function ProductDetailsPage() {
 
   const [thumbUrl, setThumbUrl] = useState<string | null>(null);
   const [accessToken, setAccessToken] = useState<string | null>(null);
+
+  // Lightbox (bildefremvisning)
+  const [activeImgUrl, setActiveImgUrl] = useState<string | null>(null);
+  const [activeImgCaption, setActiveImgCaption] = useState<string | null>(null);
 
   async function refreshLinked(productId: string) {
     const { data: links, error: linksErr } = await supabase
@@ -187,8 +193,6 @@ export default function ProductDetailsPage() {
 
       const id = params.id;
 
-      // Rolle (for å vise "koble til" UI kun for admin/purchaser)
-      // NB: profiles kan bli `never` dersom tabellen ikke er i Database-typene → cast kontrollert.
       const { data: prof, error: pErr } = (await supabase
         .from("profiles" as any)
         .select("role")
@@ -198,7 +202,6 @@ export default function ProductDetailsPage() {
       if (pErr) console.warn("profiles role lookup failed:", pErr);
       if (alive) setRole(prof?.role ?? null);
 
-      // Produkt
       const { data: prod, error: prodErr } = await supabase
         .from("products")
         .select("id, product_no, name, list_price, thumb_path, is_active")
@@ -222,7 +225,7 @@ export default function ProductDetailsPage() {
 
       setProduct(prod as ProductRow);
 
-      // Thumb signed URL (bucket: product-images)
+      // Thumb signed URL
       try {
         const p = prod as any;
         if (p.thumb_path) {
@@ -333,7 +336,6 @@ export default function ProductDetailsPage() {
         }
       }
 
-      // Koblinger
       await refreshLinked(id);
 
       if (!alive) return;
@@ -345,6 +347,18 @@ export default function ProductDetailsPage() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [params.id, router, supabase, sp]);
+
+  // ESC lukker bildefremvisning
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        setActiveImgUrl(null);
+        setActiveImgCaption(null);
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   async function onAddProductToCart(p: ProductRow) {
     addToCart(
@@ -402,10 +416,10 @@ export default function ProductDetailsPage() {
       relation_type: addType,
     };
 
-const { error } = await (supabase as any)
-  .from("product_relations")
-  .insert(payload as any);
-  
+    const { error } = await (supabase as any)
+      .from("product_relations")
+      .insert(payload as any);
+
     if (error) {
       console.error("product_relations insert failed:", error, payload);
       alert(error.message);
@@ -420,10 +434,7 @@ const { error } = await (supabase as any)
   async function unlink(link_id: string) {
     if (!product) return;
 
-    const { error } = await supabase
-      .from("product_relations")
-      .delete()
-      .eq("id", link_id);
+    const { error } = await supabase.from("product_relations").delete().eq("id", link_id);
 
     if (error) {
       console.error("product_relations delete failed:", error);
@@ -444,14 +455,54 @@ const { error } = await (supabase as any)
     );
   }, [linkSearch, linked]);
 
-  if (loading) return <div className="p-6">Laster…</div>;
-  if (!product) return <div className="p-6">Fant ikke produkt.</div>;
+  if (loading) return <div className="p-6 max-sm:bg-gray-950 max-sm:text-gray-100">Laster…</div>;
+  if (!product) return <div className="p-6 max-sm:bg-gray-950 max-sm:text-gray-100">Fant ikke produkt.</div>;
 
   const roleUpper = (role ?? "").toUpperCase();
   const isAdminOrPurchaser = roleUpper === "ADMIN" || roleUpper === "PURCHASER";
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="min-h-screen p-6 space-y-6 bg-white text-gray-900 max-sm:bg-gray-950 max-sm:text-gray-100">
+      {/* Lightbox */}
+      {activeImgUrl && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          onClick={() => {
+            setActiveImgUrl(null);
+            setActiveImgCaption(null);
+          }}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div
+            className="w-full max-w-5xl rounded-2xl border border-white/10 bg-black p-3"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between gap-3 px-2 pb-2">
+              <div className="text-sm text-gray-200 truncate">
+                {activeImgCaption ?? product.name}
+              </div>
+              <button
+                className="rounded-lg border border-white/20 px-3 py-1.5 text-sm text-gray-100 hover:bg-white/10"
+                onClick={() => {
+                  setActiveImgUrl(null);
+                  setActiveImgCaption(null);
+                }}
+              >
+                Lukk
+              </button>
+            </div>
+
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={activeImgUrl}
+              alt={activeImgCaption ?? product.name}
+              className="max-h-[75vh] w-full rounded-xl object-contain bg-black"
+            />
+          </div>
+        </div>
+      )}
+
       <div className="flex items-center justify-between gap-4">
         <button className="underline" onClick={() => router.back()}>
           ← Tilbake
@@ -459,13 +510,13 @@ const { error } = await (supabase as any)
 
         <div className="flex gap-2">
           <button
-            className="rounded-lg border px-3 py-2"
+            className="rounded-lg border px-3 py-2 hover:bg-gray-50 max-sm:hover:bg-white/10"
             onClick={() => router.push("/orders")}
           >
             Mine ordre
           </button>
           <button
-            className="rounded-lg border px-3 py-2"
+            className="rounded-lg border px-3 py-2 hover:bg-gray-50 max-sm:hover:bg-white/10"
             onClick={() => router.push("/cart")}
           >
             Handlevogn
@@ -476,29 +527,27 @@ const { error } = await (supabase as any)
       <div className="grid gap-6 lg:grid-cols-[320px,1fr]">
         {/* Venstre */}
         <div className="space-y-4">
-          <div className="rounded-xl border p-3">
+          <div className="rounded-xl border p-3 bg-white max-sm:bg-gray-900 max-sm:border-white/10">
             {thumbUrl ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img
                 src={thumbUrl}
                 alt={product.name}
-                className="w-full rounded-lg"
+                className="w-full rounded-lg object-contain"
               />
             ) : (
-              <div className="text-sm text-gray-600">Ingen bilde</div>
+              <div className="text-sm text-gray-600 max-sm:text-gray-300">Ingen bilde</div>
             )}
           </div>
 
-          <div className="rounded-xl border p-4 space-y-1">
-            <div className="text-sm text-gray-600">{product.product_no}</div>
+          <div className="rounded-xl border p-4 space-y-1 bg-white max-sm:bg-gray-900 max-sm:border-white/10">
+            <div className="text-sm text-gray-600 max-sm:text-gray-300">{product.product_no}</div>
             <div className="text-lg font-semibold">{product.name}</div>
-            <div className="text-sm font-semibold">
-              {formatNok(product.list_price)}
-            </div>
+            <div className="text-sm font-semibold">{formatNok(product.list_price)}</div>
 
             <button
               onClick={() => onAddProductToCart(product)}
-              className="mt-3 w-full rounded-lg bg-black px-4 py-2 text-white"
+              className="mt-3 w-full rounded-lg bg-black px-4 py-2 text-white hover:opacity-90"
             >
               Legg produkt i handlevogn
             </button>
@@ -508,25 +557,22 @@ const { error } = await (supabase as any)
         {/* Høyre */}
         <div className="space-y-6">
           {/* 3D */}
-          <div className="rounded-xl border p-4">
+          <div className="rounded-xl border p-4 bg-white max-sm:bg-gray-900 max-sm:border-white/10">
             <div className="flex items-center justify-between">
               <h2 className="font-semibold">3D-visning</h2>
-              <span className="text-xs text-gray-600">
-                (kommer: IFC/GLTF-viewer)
-              </span>
             </div>
-            <div className="mt-3 rounded-lg border bg-gray-50 p-6 text-sm text-gray-700">
-              Neste: vi legger inn IFC-visning (vanlig i bygg). For web vil vi
-              typisk konvertere til glTF for smooth rendering i nettleseren.
+
+            <div className="mt-3 rounded-lg border p-6 text-sm bg-gray-50 text-gray-700 max-sm:bg-black/30 max-sm:text-gray-100 max-sm:border-white/10">
+              Her kommer 3d modell visning
             </div>
           </div>
 
           {/* Galleri */}
-          <div className="rounded-xl border p-4">
+          <div className="rounded-xl border p-4 bg-white max-sm:bg-gray-900 max-sm:border-white/10">
             <h2 className="font-semibold">Bilder</h2>
 
             {images.length === 0 ? (
-              <p className="mt-2 text-sm text-gray-600">
+              <p className="mt-2 text-sm text-gray-600 max-sm:text-gray-300">
                 Ingen bilder i galleriet.
               </p>
             ) : (
@@ -535,8 +581,23 @@ const { error } = await (supabase as any)
                   const url = imgUrlByPath[img.storage_path] ?? null;
 
                   return (
-                    <div key={img.id} className="rounded-lg border p-2">
-                      <div className="aspect-square w-full overflow-hidden rounded-md bg-gray-50">
+                    <button
+                      key={img.id}
+                      type="button"
+                      className={cn(
+                        "rounded-lg border p-2 text-left transition",
+                        "hover:bg-gray-50 max-sm:hover:bg-white/5",
+                        "bg-white max-sm:bg-transparent max-sm:border-white/10"
+                      )}
+                      onClick={() => {
+                        if (!url) return;
+                        setActiveImgUrl(url);
+                        setActiveImgCaption(img.caption ?? null);
+                      }}
+                      disabled={!url}
+                      title={url ? "Trykk for å åpne" : "Mangler bilde-URL"}
+                    >
+                      <div className="aspect-square w-full overflow-hidden rounded-md bg-gray-50 max-sm:bg-black/30">
                         {url ? (
                           // eslint-disable-next-line @next/next/no-img-element
                           <img
@@ -552,12 +613,22 @@ const { error } = await (supabase as any)
                         )}
                       </div>
 
-                      {img.caption ? (
-                        <div className="mt-2 text-xs text-gray-600 line-clamp-2">
-                          {img.caption}
+                      <div className="mt-2 flex items-center justify-between gap-2">
+                        {img.caption ? (
+                          <div className="text-xs text-gray-600 max-sm:text-gray-300 line-clamp-2">
+                            {img.caption}
+                          </div>
+                        ) : (
+                          <div className="text-xs text-gray-500 max-sm:text-gray-400">
+                            Trykk for å åpne
+                          </div>
+                        )}
+
+                        <div className="text-[11px] text-gray-400 max-sm:text-gray-400">
+                          {url ? "Vis" : "Manglar"}
                         </div>
-                      ) : null}
-                    </div>
+                      </div>
+                    </button>
                   );
                 })}
               </div>
@@ -565,11 +636,11 @@ const { error } = await (supabase as any)
           </div>
 
           {/* Dokumenter */}
-          <div className="rounded-xl border p-4">
+          <div className="rounded-xl border p-4 bg-white max-sm:bg-gray-900 max-sm:border-white/10">
             <h2 className="font-semibold">Dokumenter</h2>
 
             {files.length === 0 ? (
-              <p className="mt-2 text-sm text-gray-600">
+              <p className="mt-2 text-sm text-gray-600 max-sm:text-gray-300">
                 Ingen dokumenter er knyttet til dette produktet ennå.
               </p>
             ) : (
@@ -586,20 +657,20 @@ const { error } = await (supabase as any)
                       }}
                       target="_blank"
                       rel="noreferrer"
-                      className="block rounded-lg border px-3 py-2 hover:bg-gray-50"
+                      className="block rounded-lg border px-3 py-2 hover:bg-gray-50 max-sm:hover:bg-white/10 max-sm:border-white/10"
                       title={
                         href
                           ? "Åpne dokument"
                           : "Mangler signed URL (ikke funnet / ingen tilgang)"
                       }
                     >
-                      <div className="text-xs text-gray-600">
+                      <div className="text-xs text-gray-600 max-sm:text-gray-300">
                         {niceType(f.file_type)}
                       </div>
                       <div className="text-sm font-medium">
                         {f.title ?? f.relative_path}
                       </div>
-                      <div className="text-xs text-gray-600">
+                      <div className="text-xs text-gray-600 max-sm:text-gray-400">
                         {f.relative_path}
                       </div>
                     </a>
@@ -610,11 +681,11 @@ const { error } = await (supabase as any)
           </div>
 
           {/* Reservedeler/ekstrautstyr */}
-          <div className="rounded-xl border p-4 space-y-4">
+          <div className="rounded-xl border p-4 space-y-4 bg-white max-sm:bg-gray-900 max-sm:border-white/10">
             <div className="flex items-end justify-between gap-3">
               <div>
                 <h2 className="font-semibold">Reservedeler / ekstrautstyr</h2>
-                <p className="text-sm text-gray-600">
+                <p className="text-sm text-gray-600 max-sm:text-gray-300">
                   Søk i tilknyttede produkter og legg i handlevogn.
                 </p>
               </div>
@@ -623,25 +694,24 @@ const { error } = await (supabase as any)
                 value={linkSearch}
                 onChange={(e) => setLinkSearch(e.target.value)}
                 placeholder="Søk i listen…"
-                className="w-full max-w-sm rounded-lg border px-3 py-2"
+                className="w-full max-w-sm rounded-lg border px-3 py-2 bg-white max-sm:bg-black/20 max-sm:text-gray-100 max-sm:border-white/10"
               />
             </div>
 
             {linkedFiltered.length === 0 ? (
-              <div className="rounded-lg border p-4 text-sm text-gray-600">
-                Ingen reservedeler/ekstrautstyr er knyttet til dette produktet
-                ennå.
+              <div className="rounded-lg border p-4 text-sm text-gray-600 max-sm:text-gray-300 max-sm:border-white/10">
+                Ingen reservedeler/ekstrautstyr er knyttet til dette produktet ennå.
               </div>
             ) : (
               <div className="space-y-2">
                 {linkedFiltered.map((x) => (
-                  <div key={x.link_id} className="rounded-lg border p-3">
+                  <div key={x.link_id} className="rounded-lg border p-3 max-sm:border-white/10">
                     <div className="flex items-start justify-between gap-3">
                       <div>
-                        <div className="text-xs text-gray-600">
+                        <div className="text-xs text-gray-600 max-sm:text-gray-300">
                           {linkTypeLabel(x.link_type)}
                         </div>
-                        <div className="text-sm text-gray-600">
+                        <div className="text-sm text-gray-600 max-sm:text-gray-300">
                           {x.product.product_no}
                         </div>
                         <div className="font-medium">{x.product.name}</div>
@@ -652,7 +722,7 @@ const { error } = await (supabase as any)
 
                       <div className="flex flex-col gap-2">
                         <button
-                          className="rounded-lg bg-black px-3 py-2 text-white"
+                          className="rounded-lg bg-black px-3 py-2 text-white hover:opacity-90"
                           onClick={() => onAddProductToCart(x.product)}
                         >
                           Legg i handlevogn
@@ -660,7 +730,7 @@ const { error } = await (supabase as any)
 
                         {isAdminOrPurchaser && (
                           <button
-                            className="rounded-lg border px-3 py-2 text-sm"
+                            className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50 max-sm:hover:bg-white/10 max-sm:border-white/10"
                             onClick={() => unlink(x.link_id)}
                           >
                             Fjern kobling
@@ -675,12 +745,12 @@ const { error } = await (supabase as any)
 
             {/* Admin/purchaser: koble nye */}
             {isAdminOrPurchaser && (
-              <div className="rounded-lg border p-3 space-y-3">
+              <div className="rounded-lg border p-3 space-y-3 max-sm:border-white/10">
                 <div className="font-semibold text-sm">Koble til ny</div>
 
                 <div className="grid gap-2 md:grid-cols-3">
                   <select
-                    className="rounded-lg border px-3 py-2"
+                    className="rounded-lg border px-3 py-2 bg-white max-sm:bg-black/20 max-sm:text-gray-100 max-sm:border-white/10"
                     value={addType}
                     onChange={(e) => setAddType(e.target.value as any)}
                   >
@@ -689,7 +759,7 @@ const { error } = await (supabase as any)
                   </select>
 
                   <input
-                    className="md:col-span-2 rounded-lg border px-3 py-2"
+                    className="md:col-span-2 rounded-lg border px-3 py-2 bg-white max-sm:bg-black/20 max-sm:text-gray-100 max-sm:border-white/10"
                     value={addQ}
                     onChange={(e) => {
                       setAddQ(e.target.value);
@@ -704,10 +774,10 @@ const { error } = await (supabase as any)
                     {addResults.map((p) => (
                       <div
                         key={p.id}
-                        className="flex items-center justify-between rounded-lg border p-2"
+                        className="flex items-center justify-between rounded-lg border p-2 max-sm:border-white/10"
                       >
                         <div>
-                          <div className="text-sm text-gray-600">
+                          <div className="text-sm text-gray-600 max-sm:text-gray-300">
                             {p.product_no}
                           </div>
                           <div className="font-medium">{p.name}</div>
@@ -716,7 +786,7 @@ const { error } = await (supabase as any)
                           </div>
                         </div>
                         <button
-                          className="rounded-lg bg-black px-3 py-2 text-white"
+                          className="rounded-lg bg-black px-3 py-2 text-white hover:opacity-90"
                           onClick={() => linkProduct(p)}
                         >
                           Koble til
@@ -726,9 +796,8 @@ const { error } = await (supabase as any)
                   </div>
                 )}
 
-                <div className="text-xs text-gray-600">
-                  (Denne koblingen er data i databasen – så alle brukere ser
-                  samme oppsett.)
+                <div className="text-xs text-gray-600 max-sm:text-gray-400">
+                  (Denne koblingen er data i databasen – så alle brukere ser samme oppsett.)
                 </div>
 
                 {process.env.NODE_ENV !== "production" && (
