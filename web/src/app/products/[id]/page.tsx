@@ -11,7 +11,7 @@ type ProductRow = {
   product_no: string;
   name: string;
   list_price: number | null;
-  thumb_path: string | null; // Supabase Storage path (bucket: product-images)
+  thumb_path: string | null; // storage path in bucket "product-images" (recommended) OR legacy URL
   is_active: boolean | null;
 };
 
@@ -19,12 +19,12 @@ type ProductFileRow = {
   id: string;
   file_type: string;
   title: string | null;
-  relative_path: string; // Supabase Storage path (bucket: product-files)
+  relative_path: string; // storage path in bucket "product-files"
 };
 
 type ProductImageRow = {
   id: string;
-  storage_bucket: string; // "product-images"
+  storage_bucket: string; // usually "product-images"
   storage_path: string;
   caption: string | null;
   sort_order: number | null;
@@ -67,30 +67,26 @@ function linkTypeLabel(t: LinkedRow["link_type"]) {
   return t === "SPARE_PART" ? "Reservedel" : "Ekstrautstyr";
 }
 
-async function fetchSignedUrl(opts: {
-  token: string;
-  bucket: string;
-  path: string;
-  expires?: number;
-  download?: boolean;
-}) {
-  const qs = new URLSearchParams({
-    bucket: opts.bucket,
-    path: opts.path,
-    expires: String(opts.expires ?? 600),
-    ...(opts.download ? { download: "1" } : {}),
-  });
+/**
+ * Accept:
+ *  - "folder/file.jpg"
+ *  - "/folder/file.jpg"
+ *  - "product-images/folder/file.jpg" (legacy)
+ *  - full URL
+ */
+function normalizeStoragePath(p: string | null, bucketToStrip?: string) {
+  if (!p) return null;
+  const s0 = String(p).trim();
+  if (!s0) return null;
 
-  const res = await fetch(`/api/files/signed-url?${qs.toString()}`, {
-    method: "GET",
-    headers: { authorization: `Bearer ${opts.token}` },
-  });
+  if (s0.startsWith("http://") || s0.startsWith("https://")) return s0;
 
-  const data = await res.json().catch(() => null);
-  if (!res.ok || !data?.ok) {
-    throw new Error(data?.error ?? `Signed URL failed (status ${res.status})`);
+  let s = s0.replace(/^\/+/, "");
+  if (bucketToStrip) {
+    const re = new RegExp(`^${bucketToStrip.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\/`);
+    s = s.replace(re, "");
   }
-  return data.url as string;
+  return s;
 }
 
 export default function ProductDetailsPage() {
@@ -103,7 +99,9 @@ export default function ProductDetailsPage() {
   const [product, setProduct] = useState<ProductRow | null>(null);
 
   const [files, setFiles] = useState<ProductFileRow[]>([]);
-  const [fileUrlByPath, setFileUrlByPath] = useState<Record<string, string>>({});
+  const [fileUrlByPath, setFileUrlByPath] = useState<Record<string, string>>(
+    {}
+  );
 
   const [images, setImages] = useState<ProductImageRow[]>([]);
   const [imgUrlByPath, setImgUrlByPath] = useState<Record<string, string>>({});
@@ -117,11 +115,46 @@ export default function ProductDetailsPage() {
   const [role, setRole] = useState<string | null>(null);
 
   const [thumbUrl, setThumbUrl] = useState<string | null>(null);
-  const [accessToken, setAccessToken] = useState<string | null>(null);
 
-  // Lightbox (bildefremvisning)
+  // Lightbox
   const [activeImgUrl, setActiveImgUrl] = useState<string | null>(null);
   const [activeImgCaption, setActiveImgCaption] = useState<string | null>(null);
+
+  async function getUrlFromStorage(opts: {
+    bucket: string;
+    pathOrUrl: string;
+    expires?: number;
+    download?: boolean;
+  }): Promise<string | null> {
+    const raw = opts.pathOrUrl;
+
+    // already URL
+    if (raw.startsWith("http://") || raw.startsWith("https://")) return raw;
+
+    const path = normalizeStoragePath(raw, opts.bucket);
+    if (!path) return null;
+
+    // 1) Signed URL (works with private buckets + RLS)
+    try {
+      const { data, error } = await (supabase.storage as any)
+        .from(opts.bucket)
+        .createSignedUrl(path, opts.expires ?? 600, opts.download ? { download: true } : undefined);
+
+      if (!error && data?.signedUrl) return data.signedUrl as string;
+    } catch (e) {
+      console.warn("createSignedUrl failed:", opts.bucket, path, e);
+    }
+
+    // 2) Public URL fallback (works if bucket public)
+    try {
+      const pub = supabase.storage.from(opts.bucket).getPublicUrl(path);
+      const url = pub?.data?.publicUrl ?? null;
+      return url;
+    } catch (e) {
+      console.warn("getPublicUrl failed:", opts.bucket, path, e);
+      return null;
+    }
+  }
 
   async function refreshLinked(productId: string) {
     const { data: links, error: linksErr } = await supabase
@@ -177,22 +210,16 @@ export default function ProductDetailsPage() {
     (async () => {
       setLoading(true);
 
+      // Must be logged in
       const { data: userRes } = await supabase.auth.getUser();
       if (!userRes.user) {
         router.replace("/login");
         return;
       }
 
-      const { data: sess } = await supabase.auth.getSession();
-      const token = sess.session?.access_token ?? null;
-      if (!token) {
-        router.replace("/login");
-        return;
-      }
-      if (alive) setAccessToken(token);
-
       const id = params.id;
 
+      // Role (for admin/purchaser UI)
       const { data: prof, error: pErr } = (await supabase
         .from("profiles" as any)
         .select("role")
@@ -202,6 +229,7 @@ export default function ProductDetailsPage() {
       if (pErr) console.warn("profiles role lookup failed:", pErr);
       if (alive) setRole(prof?.role ?? null);
 
+      // Product
       const { data: prod, error: prodErr } = await supabase
         .from("products")
         .select("id, product_no, name, list_price, thumb_path, is_active")
@@ -225,26 +253,7 @@ export default function ProductDetailsPage() {
 
       setProduct(prod as ProductRow);
 
-      // Thumb signed URL
-      try {
-        const p = prod as any;
-        if (p.thumb_path) {
-          const u = await fetchSignedUrl({
-            token,
-            bucket: "product-images",
-            path: String(p.thumb_path),
-            expires: 600,
-          });
-          if (alive) setThumbUrl(u);
-        } else {
-          if (alive) setThumbUrl(null);
-        }
-      } catch (e) {
-        console.warn("thumb signed-url failed:", (prod as any).thumb_path, e);
-        if (alive) setThumbUrl(null);
-      }
-
-      // Dokumenter
+      // Files
       const { data: fileRows, error: fileErr } = await supabase
         .from("product_files")
         .select("id, file_type, title, relative_path")
@@ -253,32 +262,39 @@ export default function ProductDetailsPage() {
 
       if (!alive) return;
 
-      if (fileErr) {
-        console.error("product_files select failed:", fileErr);
-        setFiles([]);
-        setFileUrlByPath({});
-      } else {
-        const list = (fileRows ?? []) as ProductFileRow[];
-        setFiles(list);
+      const fileList = fileErr ? [] : ((fileRows ?? []) as ProductFileRow[]);
+      if (fileErr) console.error("product_files select failed:", fileErr);
+      setFiles(fileList);
 
-        const uniquePaths = Array.from(
-          new Set(list.map((x) => x.relative_path).filter(Boolean))
+      // Gallery images
+      const { data: imgRows, error: imgErr } = await supabase
+        .from("product_images")
+        .select("id, storage_bucket, storage_path, caption, sort_order")
+        .eq("product_id", id)
+        .order("sort_order", { ascending: true })
+        .order("created_at", { ascending: true });
+
+      if (!alive) return;
+
+      const imgList = imgErr ? [] : ((imgRows ?? []) as ProductImageRow[]);
+      if (imgErr) console.error("product_images select failed:", imgErr);
+      setImages(imgList);
+
+      // Build URLs (documents)
+      {
+        const unique = Array.from(
+          new Set(fileList.map((x) => x.relative_path).filter(Boolean))
         ) as string[];
 
         const entries: Array<[string, string]> = [];
-        for (const storagePath of uniquePaths) {
-          try {
-            const u = await fetchSignedUrl({
-              token,
-              bucket: "product-files",
-              path: storagePath,
-              expires: 600,
-              download: true,
-            });
-            entries.push([storagePath, u]);
-          } catch (e) {
-            console.warn("doc signed-url failed:", storagePath, e);
-          }
+        for (const p of unique) {
+          const url = await getUrlFromStorage({
+            bucket: "product-files",
+            pathOrUrl: p,
+            expires: 900,
+            download: true,
+          });
+          if (url) entries.push([p, url]);
         }
 
         if (alive) {
@@ -290,52 +306,52 @@ export default function ProductDetailsPage() {
         }
       }
 
-      // Galleri-bilder
-      const { data: imgRows, error: imgErr } = await supabase
-        .from("product_images")
-        .select("id, storage_bucket, storage_path, caption, sort_order")
-        .eq("product_id", id)
-        .order("sort_order", { ascending: true })
-        .order("created_at", { ascending: true });
-
-      if (!alive) return;
-
-      if (imgErr) {
-        console.error("product_images select failed:", imgErr);
-        setImages([]);
-        setImgUrlByPath({});
-      } else {
-        const list = (imgRows ?? []) as ProductImageRow[];
-        setImages(list);
-
-        const uniqueImgPaths = Array.from(
-          new Set(list.map((x) => x.storage_path).filter(Boolean))
+      // Build URLs (gallery images)
+      {
+        const unique = Array.from(
+          new Set(imgList.map((x) => x.storage_path).filter(Boolean))
         ) as string[];
 
-        const imgEntries: Array<[string, string]> = [];
-        for (const storagePath of uniqueImgPaths) {
-          try {
-            const u = await fetchSignedUrl({
-              token,
-              bucket: "product-images",
-              path: storagePath,
-              expires: 600,
-            });
-            imgEntries.push([storagePath, u]);
-          } catch (e) {
-            console.warn("image signed-url failed:", storagePath, e);
-          }
+        const entries: Array<[string, string]> = [];
+        for (const p of unique) {
+          const url = await getUrlFromStorage({
+            bucket: "product-images",
+            pathOrUrl: p,
+            expires: 900,
+          });
+          if (url) entries.push([p, url]);
         }
 
         if (alive) {
           setImgUrlByPath(() => {
             const next: Record<string, string> = {};
-            for (const [p, u] of imgEntries) next[p] = u;
+            for (const [p, u] of entries) next[p] = u;
             return next;
           });
         }
       }
 
+      // Thumbnail:
+      // 1) products.thumb_path if present
+      // 2) else first gallery image (by sort_order/created_at)
+      {
+        const thumbCandidate =
+          (prod as any).thumb_path ||
+          (imgList.length > 0 ? imgList[0].storage_path : null);
+
+        if (thumbCandidate) {
+          const url = await getUrlFromStorage({
+            bucket: "product-images",
+            pathOrUrl: String(thumbCandidate),
+            expires: 900,
+          });
+          if (alive) setThumbUrl(url);
+        } else {
+          if (alive) setThumbUrl(null);
+        }
+      }
+
+      // Linked relations
       await refreshLinked(id);
 
       if (!alive) return;
@@ -348,7 +364,7 @@ export default function ProductDetailsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [params.id, router, supabase, sp]);
 
-  // ESC lukker bildefremvisning
+  // ESC closes lightbox
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if (e.key === "Escape") {
@@ -434,7 +450,10 @@ export default function ProductDetailsPage() {
   async function unlink(link_id: string) {
     if (!product) return;
 
-    const { error } = await supabase.from("product_relations").delete().eq("id", link_id);
+    const { error } = await supabase
+      .from("product_relations")
+      .delete()
+      .eq("id", link_id);
 
     if (error) {
       console.error("product_relations delete failed:", error);
@@ -455,8 +474,16 @@ export default function ProductDetailsPage() {
     );
   }, [linkSearch, linked]);
 
-  if (loading) return <div className="p-6 max-sm:bg-gray-950 max-sm:text-gray-100">Laster…</div>;
-  if (!product) return <div className="p-6 max-sm:bg-gray-950 max-sm:text-gray-100">Fant ikke produkt.</div>;
+  if (loading)
+    return (
+      <div className="p-6 max-sm:bg-gray-950 max-sm:text-gray-100">Laster…</div>
+    );
+  if (!product)
+    return (
+      <div className="p-6 max-sm:bg-gray-950 max-sm:text-gray-100">
+        Fant ikke produkt.
+      </div>
+    );
 
   const roleUpper = (role ?? "").toUpperCase();
   const isAdminOrPurchaser = roleUpper === "ADMIN" || roleUpper === "PURCHASER";
@@ -529,21 +556,39 @@ export default function ProductDetailsPage() {
         <div className="space-y-4">
           <div className="rounded-xl border p-3 bg-white max-sm:bg-gray-900 max-sm:border-white/10">
             {thumbUrl ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={thumbUrl}
-                alt={product.name}
-                className="w-full rounded-lg object-contain"
-              />
+              <button
+                type="button"
+                className="block w-full"
+                onClick={() => {
+                  setActiveImgUrl(thumbUrl);
+                  setActiveImgCaption(product.name);
+                }}
+                title="Trykk for å åpne"
+              >
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={thumbUrl}
+                  alt={product.name}
+                  className="w-full rounded-lg object-contain"
+                  loading="eager"
+                />
+              </button>
             ) : (
-              <div className="text-sm text-gray-600 max-sm:text-gray-300">Ingen bilde</div>
+              <div className="text-sm text-gray-600 max-sm:text-gray-300">
+                Ingen thumbnail funnet. (Vi prøver <span className="font-mono">products.thumb_path</span>{" "}
+                og ellers første bilde i galleriet.)
+              </div>
             )}
           </div>
 
           <div className="rounded-xl border p-4 space-y-1 bg-white max-sm:bg-gray-900 max-sm:border-white/10">
-            <div className="text-sm text-gray-600 max-sm:text-gray-300">{product.product_no}</div>
+            <div className="text-sm text-gray-600 max-sm:text-gray-300">
+              {product.product_no}
+            </div>
             <div className="text-lg font-semibold">{product.name}</div>
-            <div className="text-sm font-semibold">{formatNok(product.list_price)}</div>
+            <div className="text-sm font-semibold">
+              {formatNok(product.list_price)}
+            </div>
 
             <button
               onClick={() => onAddProductToCart(product)}
@@ -613,7 +658,7 @@ export default function ProductDetailsPage() {
                         )}
                       </div>
 
-                      <div className="mt-2 flex items-center justify-between gap-2">
+                      <div className="mt-2">
                         {img.caption ? (
                           <div className="text-xs text-gray-600 max-sm:text-gray-300 line-clamp-2">
                             {img.caption}
@@ -623,10 +668,6 @@ export default function ProductDetailsPage() {
                             Trykk for å åpne
                           </div>
                         )}
-
-                        <div className="text-[11px] text-gray-400 max-sm:text-gray-400">
-                          {url ? "Vis" : "Manglar"}
-                        </div>
                       </div>
                     </button>
                   );
@@ -660,8 +701,8 @@ export default function ProductDetailsPage() {
                       className="block rounded-lg border px-3 py-2 hover:bg-gray-50 max-sm:hover:bg-white/10 max-sm:border-white/10"
                       title={
                         href
-                          ? "Åpne dokument"
-                          : "Mangler signed URL (ikke funnet / ingen tilgang)"
+                          ? "Last ned / åpne dokument"
+                          : "Mangler URL (sjekk at fil finnes i bucket product-files)"
                       }
                     >
                       <div className="text-xs text-gray-600 max-sm:text-gray-300">
@@ -700,12 +741,16 @@ export default function ProductDetailsPage() {
 
             {linkedFiltered.length === 0 ? (
               <div className="rounded-lg border p-4 text-sm text-gray-600 max-sm:text-gray-300 max-sm:border-white/10">
-                Ingen reservedeler/ekstrautstyr er knyttet til dette produktet ennå.
+                Ingen reservedeler/ekstrautstyr er knyttet til dette produktet
+                ennå.
               </div>
             ) : (
               <div className="space-y-2">
                 {linkedFiltered.map((x) => (
-                  <div key={x.link_id} className="rounded-lg border p-3 max-sm:border-white/10">
+                  <div
+                    key={x.link_id}
+                    className="rounded-lg border p-3 max-sm:border-white/10"
+                  >
                     <div className="flex items-start justify-between gap-3">
                       <div>
                         <div className="text-xs text-gray-600 max-sm:text-gray-300">
@@ -797,14 +842,9 @@ export default function ProductDetailsPage() {
                 )}
 
                 <div className="text-xs text-gray-600 max-sm:text-gray-400">
-                  (Denne koblingen er data i databasen – så alle brukere ser samme oppsett.)
+                  (Denne koblingen er data i databasen – så alle brukere ser samme
+                  oppsett.)
                 </div>
-
-                {process.env.NODE_ENV !== "production" && (
-                  <div className="text-[11px] text-gray-400">
-                    auth: {accessToken ? "ok" : "missing"}
-                  </div>
-                )}
               </div>
             )}
           </div>
