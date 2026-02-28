@@ -83,19 +83,38 @@ function daysUntil(iso: string | null) {
   return Math.round((d.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
 }
 
+// Mobile: dark-first. Desktop: light.
 function statusTone(status: string) {
   const s = String(status ?? "").toUpperCase();
 
-  if (s === "DELIVERED") return "border-green-200 bg-green-50 text-green-800";
-  if (s === "CANCELLED") return "border-red-200 bg-red-50 text-red-800";
+  if (s === "DELIVERED")
+    return cn(
+      "border-emerald-700/40 bg-emerald-950/40 text-emerald-200",
+      "md:border-emerald-200 md:bg-emerald-50 md:text-emerald-800"
+    );
+
+  if (s === "CANCELLED")
+    return cn(
+      "border-red-700/40 bg-red-950/40 text-red-200",
+      "md:border-red-200 md:bg-red-50 md:text-red-800"
+    );
 
   if (["SUBMITTED", "IN_REVIEW", "ORDERED"].includes(s))
-    return "border-amber-200 bg-amber-50 text-amber-800";
+    return cn(
+      "border-amber-700/40 bg-amber-950/40 text-amber-200",
+      "md:border-amber-200 md:bg-amber-50 md:text-amber-800"
+    );
 
   if (["CONFIRMED", "SHIPPING"].includes(s))
-    return "border-blue-200 bg-blue-50 text-blue-800";
+    return cn(
+      "border-sky-700/40 bg-sky-950/40 text-sky-200",
+      "md:border-blue-200 md:bg-blue-50 md:text-blue-800"
+    );
 
-  return "border-gray-200 bg-gray-50 text-gray-800";
+  return cn(
+    "border-gray-700 bg-gray-900 text-gray-200",
+    "md:border-gray-200 md:bg-gray-50 md:text-gray-800"
+  );
 }
 
 function formatNok(value: number) {
@@ -137,7 +156,7 @@ export default function OrderDetailsPage() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const [myEmail, setMyEmail] = useState<string>("");
-  const [myUsername, setMyUsername] = useState<string | null>(null);
+  const [myDisplayName, setMyDisplayName] = useState<string>("");
   const [myRole, setMyRole] = useState<Role>("kunde");
 
   const [downloading, setDownloading] = useState(false);
@@ -184,7 +203,7 @@ export default function OrderDetailsPage() {
         return;
       }
 
-      // 3) Rolle + username fra server
+      // 3) Rolle + display_name fra server
       try {
         const meRes = await fetch("/api/auth/me", {
           method: "GET",
@@ -201,9 +220,12 @@ export default function OrderDetailsPage() {
 
         if (!alive) return;
 
-        setMyEmail(String(me.email ?? "").toLowerCase());
+        const email = String(me.email ?? "").toLowerCase();
+        const display = String(me.display_name ?? "").trim();
+
+        setMyEmail(email);
+        setMyDisplayName(display || email);
         setMyRole((String(me.role ?? "kunde") as Role) ?? "kunde");
-        setMyUsername(me.username ?? null);
       } catch {
         await supabase.auth.signOut();
         router.replace("/login");
@@ -355,24 +377,24 @@ export default function OrderDetailsPage() {
 
   if (loading) {
     return (
-      <div className="p-6">
+      <div className="min-h-screen bg-gray-950 text-gray-100 md:bg-white md:text-gray-900 p-6">
         <h1 className="text-xl font-semibold">Ordre</h1>
-        <p className="mt-2 text-sm text-gray-600">Laster…</p>
+        <p className="mt-2 text-sm text-gray-400 md:text-gray-600">Laster…</p>
       </div>
     );
   }
 
   if (!order) {
     return (
-      <div className="p-6 space-y-4">
+      <div className="min-h-screen bg-gray-950 text-gray-100 md:bg-white md:text-gray-900 p-6 space-y-4">
         <button
-          className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50"
+          className="rounded-xl border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-gray-100 hover:bg-gray-800 md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50"
           onClick={() => router.push("/orders")}
         >
           ← Tilbake til ordreoversikt
         </button>
 
-        <div className="rounded-2xl border p-5 text-sm text-gray-700">
+        <div className="rounded-2xl border border-gray-800 bg-gray-900/40 p-5 text-sm text-gray-200 md:border-gray-200 md:bg-white md:text-gray-700">
           {errorMsg ?? "Ukjent feil."}
         </div>
       </div>
@@ -382,217 +404,270 @@ export default function OrderDetailsPage() {
   const diff = order.expected_delivery_date ? daysUntil(order.expected_delivery_date) : null;
 
   return (
-    <div className="p-6 space-y-6">
-      {/* Top navigation */}
-      <header className="flex flex-wrap items-center justify-between gap-3">
-        <button
-          className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50"
-          onClick={() => router.push("/orders")}
-        >
-          ← Mine bestillinger
-        </button>
-
-        <div className="flex items-center gap-2">
-          <button
-            className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50"
-            onClick={() => router.push("/products")}
-          >
-            Produkter
-          </button>
-          <button
-            className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50"
-            onClick={() => router.push("/cart")}
-          >
-            Handlevogn
-          </button>
-        </div>
-      </header>
-
-      {/* Summary card */}
-      <div className="rounded-2xl border bg-white p-5 shadow-sm">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div className="space-y-1">
-            <div className="text-sm text-gray-600">Opprettet: {formatDateTime(order.created_at)}</div>
-
-            <div className="text-lg font-semibold">{order.project_name}</div>
-
-            {order.project_no ? (
-              <div className="text-sm text-gray-600">Prosjekt nr: {order.project_no}</div>
-            ) : null}
-
-            <div
-              className={cn(
-                "mt-1 inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm",
-                statusTone(order.status)
-              )}
+    <div className="min-h-screen bg-gray-950 text-gray-100 md:bg-white md:text-gray-900">
+      {/* Topbar */}
+      <div className="sticky top-0 z-10 border-b border-gray-800 bg-gray-950/95 backdrop-blur md:border-gray-200 md:bg-white/80">
+        <div className="mx-auto max-w-5xl px-4 md:px-6 py-3">
+          <header className="flex flex-wrap items-center justify-between gap-3">
+            <button
+              className="rounded-xl border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-gray-100 hover:bg-gray-800 md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50"
+              onClick={() => router.push("/orders")}
             >
-              <span className="font-medium">{statusLabel(order.status)}</span>
+              ← Mine bestillinger
+            </button>
+
+            <div className="flex items-center gap-2">
+              <button
+                className="rounded-xl border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-gray-100 hover:bg-gray-800 md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50"
+                onClick={() => router.push("/products")}
+              >
+                Produkter
+              </button>
+              <button
+                className="rounded-xl border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-gray-100 hover:bg-gray-800 md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50"
+                onClick={() => router.push("/cart")}
+              >
+                Handlevogn
+              </button>
             </div>
+          </header>
+        </div>
+      </div>
 
-            {order.expected_delivery_date ? (
-              <div className="mt-2 text-sm text-gray-700 space-y-1">
-                <div>
-                  Forventet levering:{" "}
-                  <span className="font-medium">{formatDateOnly(order.expected_delivery_date)}</span>
-                </div>
+      {/* Content */}
+      <div className="mx-auto max-w-5xl px-4 md:px-6 py-5 space-y-4">
+        {/* Summary card */}
+        <div className="rounded-2xl border border-gray-800 bg-gray-900/40 p-4 md:p-5 md:border-gray-200 md:bg-white">
+          <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+            <div className="space-y-1">
+              <div className="text-xs text-gray-300 md:text-gray-600">
+                Opprettet: {formatDateTime(order.created_at)}
+              </div>
 
-                {typeof diff === "number" ? (
-                  <div
-                    className={cn(
-                      "text-xs font-medium",
-                      diff < 0 ? "text-red-700" : diff <= 3 ? "text-amber-700" : "text-gray-600"
-                    )}
-                  >
-                    {diff < 0
-                      ? `${Math.abs(diff)} dager forsinket`
-                      : diff === 0
-                      ? "Levering i dag"
-                      : `${diff} dager til levering`}
+              <div className="text-lg font-semibold text-gray-100 md:text-gray-900">
+                {order.project_name}
+              </div>
+
+              {order.project_no ? (
+                <div className="text-sm text-gray-300 md:text-gray-600">Prosjekt nr: {order.project_no}</div>
+              ) : null}
+
+              <div
+                className={cn(
+                  "mt-2 inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs md:text-sm",
+                  statusTone(order.status)
+                )}
+              >
+                <span className="font-medium">{statusLabel(order.status)}</span>
+              </div>
+
+              {order.expected_delivery_date ? (
+                <div className="mt-2 text-sm space-y-1">
+                  <div className="text-gray-200 md:text-gray-700">
+                    Forventet levering:{" "}
+                    <span className="font-medium text-gray-100 md:text-gray-900">
+                      {formatDateOnly(order.expected_delivery_date)}
+                    </span>
                   </div>
-                ) : null}
-              </div>
-            ) : null}
 
-            {order.delivery_info ? (
-              <div className="mt-3 rounded-xl border bg-gray-50 p-3 text-sm text-gray-700 whitespace-pre-line">
-                {order.delivery_info}
-              </div>
-            ) : null}
+                  {typeof diff === "number" ? (
+                    <div
+                      className={cn(
+                        "text-xs font-medium",
+                        diff < 0
+                          ? "text-red-300 md:text-red-700"
+                          : diff <= 3
+                            ? "text-amber-300 md:text-amber-700"
+                            : "text-gray-400 md:text-gray-600"
+                      )}
+                    >
+                      {diff < 0
+                        ? `${Math.abs(diff)} dager forsinket`
+                        : diff === 0
+                          ? "Levering i dag"
+                          : `${diff} dager til levering`}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
 
-            {myUsername || myEmail ? (
-              <div className="mt-3 text-xs text-gray-500">
-                {myUsername ?? myEmail} · {myRole}
-              </div>
-            ) : null}
-          </div>
+              {order.delivery_info ? (
+                <div className="mt-3 rounded-xl border border-gray-800 bg-gray-950/40 p-3 text-sm text-gray-200 whitespace-pre-line md:border-gray-200 md:bg-gray-50 md:text-gray-700">
+                  {order.delivery_info}
+                </div>
+              ) : null}
 
-          <div className="flex flex-col items-start gap-2">
-            {order.confirmation_file_path ? (
-              <button
-                disabled={downloading}
-                className="rounded-lg bg-black px-4 py-2 text-sm text-white disabled:opacity-50"
-                onClick={openConfirmation}
-              >
-                {downloading ? "Henter lenke…" : "Last ned ordrebekreftelse"}
-              </button>
-            ) : (
-              <div className="rounded-lg border px-4 py-2 text-sm text-gray-600">
-                Ingen ordrebekreftelse ennå
-              </div>
-            )}
-
-            <div className="rounded-lg border px-4 py-2 text-sm">
-              Sum: <span className="font-semibold">{formatNok(total)}</span>
+              {(myDisplayName || myEmail) && (
+                <div className="mt-3 text-xs text-gray-300 md:text-gray-500">
+                  {myDisplayName || myEmail} · {myRole}
+                </div>
+              )}
             </div>
 
-            {isAdmin ? (
-              <button
-                disabled={deleting}
-                className={cn("rounded-lg border px-4 py-2 text-sm hover:bg-gray-50", "disabled:opacity-50")}
-                onClick={deleteOrder}
-                title="Slett ordre"
-              >
-                {deleting ? "Sletter…" : "Slett ordre"}
-              </button>
-            ) : null}
+            <div className="flex flex-col gap-2 md:items-end">
+              {order.confirmation_file_path ? (
+                <button
+                  disabled={downloading}
+                  className="rounded-xl bg-white/10 px-4 py-2 text-sm text-gray-100 hover:bg-white/15 disabled:opacity-50 md:bg-black md:text-white md:hover:opacity-90"
+                  onClick={openConfirmation}
+                >
+                  {downloading ? "Henter lenke…" : "Last ned ordrebekreftelse"}
+                </button>
+              ) : (
+                <div className="rounded-xl border border-gray-800 bg-gray-950/40 px-4 py-2 text-sm text-gray-300 md:border-gray-200 md:bg-white md:text-gray-600">
+                  Ingen ordrebekreftelse ennå
+                </div>
+              )}
 
-            {toast ? <div className="text-xs text-green-700">{toast}</div> : null}
+              <div className="rounded-xl border border-gray-800 bg-gray-950/40 px-4 py-2 text-sm md:border-gray-200 md:bg-white">
+                Sum: <span className="font-semibold text-gray-100 md:text-gray-900">{formatNok(total)}</span>
+              </div>
+
+              {isAdmin ? (
+                <button
+                  disabled={deleting}
+                  className="rounded-xl border border-red-700/50 bg-red-950/30 px-4 py-2 text-sm text-red-200 hover:bg-red-950/45 disabled:opacity-50 md:border-red-200 md:bg-white md:text-red-700 md:hover:bg-red-50"
+                  onClick={deleteOrder}
+                  title="Slett ordre"
+                >
+                  {deleting ? "Sletter…" : "Slett ordre"}
+                </button>
+              ) : null}
+
+              {toast ? <div className="text-xs text-emerald-300 md:text-green-700">{toast}</div> : null}
+            </div>
           </div>
         </div>
-      </div>
 
-      {/* Contact + delivery */}
-      <div className="grid gap-4 lg:grid-cols-2">
-        <section className="rounded-2xl border bg-white p-5 shadow-sm space-y-3">
-          <h2 className="font-semibold">Kontakt</h2>
-          <div className="text-sm text-gray-800 space-y-1">
-            <div>
-              <span className="text-gray-600">Navn:</span>{" "}
-              <span className="font-medium">{order.contact_name}</span>
-            </div>
-            {order.contact_phone ? (
-              <div>
-                <span className="text-gray-600">Telefon:</span> {order.contact_phone}
+        {/* Contact + delivery */}
+        <div className="grid gap-3 md:gap-4 lg:grid-cols-2">
+          <section className="rounded-2xl border border-gray-800 bg-gray-900/40 p-4 md:p-5 md:border-gray-200 md:bg-white space-y-3">
+            <h2 className="font-semibold text-gray-100 md:text-gray-900">Kontakt</h2>
+            <div className="text-sm space-y-1">
+              <div className="text-gray-200 md:text-gray-800">
+                <span className="text-gray-400 md:text-gray-600">Navn:</span>{" "}
+                <span className="font-medium">{order.contact_name}</span>
               </div>
-            ) : null}
-            {order.contact_email ? (
-              <div>
-                <span className="text-gray-600">E-post:</span> {order.contact_email}
-              </div>
-            ) : null}
-          </div>
-        </section>
-
-        <section className="rounded-2xl border bg-white p-5 shadow-sm space-y-3">
-          <h2 className="font-semibold">Levering</h2>
-          <div className="text-sm text-gray-800 space-y-1">
-            <div className="whitespace-pre-line">{order.delivery_address}</div>
-            <div>
-              {[order.delivery_postcode, order.delivery_city].filter(Boolean).join(" ")}
+              {order.contact_phone ? (
+                <div className="text-gray-200 md:text-gray-800">
+                  <span className="text-gray-400 md:text-gray-600">Telefon:</span> {order.contact_phone}
+                </div>
+              ) : null}
+              {order.contact_email ? (
+                <div className="text-gray-200 md:text-gray-800">
+                  <span className="text-gray-400 md:text-gray-600">E-post:</span> {order.contact_email}
+                </div>
+              ) : null}
             </div>
-          </div>
-        </section>
-      </div>
+          </section>
 
-      {/* Comment */}
-      {order.comment ? (
-        <section className="rounded-2xl border bg-white p-5 shadow-sm space-y-2">
-          <h2 className="font-semibold">Kommentar</h2>
-          <p className="text-sm text-gray-800 whitespace-pre-line">{order.comment}</p>
-        </section>
-      ) : null}
-
-      {/* Order lines */}
-      <section className="rounded-2xl border bg-white p-5 shadow-sm space-y-3">
-        <div className="flex items-end justify-between gap-3">
-          <h2 className="font-semibold">Ordrelinjer</h2>
-          <div className="text-sm text-gray-600">{items.length} linje(r)</div>
+          <section className="rounded-2xl border border-gray-800 bg-gray-900/40 p-4 md:p-5 md:border-gray-200 md:bg-white space-y-3">
+            <h2 className="font-semibold text-gray-100 md:text-gray-900">Levering</h2>
+            <div className="text-sm space-y-1">
+              <div className="whitespace-pre-line text-gray-200 md:text-gray-800">{order.delivery_address}</div>
+              <div className="text-gray-200 md:text-gray-800">
+                {[order.delivery_postcode, order.delivery_city].filter(Boolean).join(" ")}
+              </div>
+            </div>
+          </section>
         </div>
 
-        {items.length === 0 ? (
-          <div className="rounded-xl border bg-gray-50 p-4 text-sm text-gray-600">
-            Ingen ordrelinjer funnet.
+        {/* Comment */}
+        {order.comment ? (
+          <section className="rounded-2xl border border-gray-800 bg-gray-900/40 p-4 md:p-5 md:border-gray-200 md:bg-white space-y-2">
+            <h2 className="font-semibold text-gray-100 md:text-gray-900">Kommentar</h2>
+            <p className="text-sm text-gray-200 md:text-gray-800 whitespace-pre-line">{order.comment}</p>
+          </section>
+        ) : null}
+
+        {/* Order lines */}
+        <section className="rounded-2xl border border-gray-800 bg-gray-900/40 p-4 md:p-5 md:border-gray-200 md:bg-white space-y-3">
+          <div className="flex items-end justify-between gap-3">
+            <h2 className="font-semibold text-gray-100 md:text-gray-900">Ordrelinjer</h2>
+            <div className="text-sm text-gray-300 md:text-gray-600">{items.length} linje(r)</div>
           </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full border-collapse text-sm">
-              <thead>
-                <tr className="text-left text-gray-600">
-                  <th className="border-b py-2 pr-3">Produkt</th>
-                  <th className="border-b py-2 pr-3">Navn</th>
-                  <th className="border-b py-2 pr-3 text-right">Antall</th>
-                  <th className="border-b py-2 pr-3 text-right">Pris</th>
-                  <th className="border-b py-2 text-right">Linjesum</th>
-                </tr>
-              </thead>
-              <tbody>
+
+          {items.length === 0 ? (
+            <div className="rounded-xl border border-gray-800 bg-gray-950/40 p-4 text-sm text-gray-200 md:border-gray-200 md:bg-gray-50 md:text-gray-600">
+              Ingen ordrelinjer funnet.
+            </div>
+          ) : (
+            <>
+              {/* Mobil: kort-liste */}
+              <div className="space-y-2 md:hidden">
                 {items.map((x) => {
                   const line = safeNumber(x.unit_price) * safeNumber(x.qty);
                   return (
-                    <tr key={x.id} className="align-top">
-                      <td className="border-b py-2 pr-3 font-medium">{x.product_no}</td>
-                      <td className="border-b py-2 pr-3">{x.name}</td>
-                      <td className="border-b py-2 pr-3 text-right">{x.qty}</td>
-                      <td className="border-b py-2 pr-3 text-right">
-                        {formatNok(safeNumber(x.unit_price))}
-                      </td>
-                      <td className="border-b py-2 text-right">{formatNok(line)}</td>
-                    </tr>
+                    <div key={x.id} className="rounded-xl border border-gray-800 bg-gray-950/40 p-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="text-xs font-mono text-gray-400">{x.product_no}</div>
+                          <div className="text-sm font-medium text-gray-100 truncate" title={x.name}>
+                            {x.name}
+                          </div>
+                          <div className="mt-1 text-xs text-gray-300">
+                            Antall: <span className="font-medium text-gray-100">{x.qty}</span>
+                          </div>
+                        </div>
+                        <div className="text-right shrink-0">
+                          <div className="text-xs text-gray-400">Pris</div>
+                          <div className="text-sm font-semibold text-gray-100">{formatNok(safeNumber(x.unit_price))}</div>
+                        </div>
+                      </div>
+                      <div className="mt-2 flex items-center justify-between">
+                        <div className="text-xs text-gray-400">Linjesum</div>
+                        <div className="text-sm font-semibold text-gray-100">{formatNok(line)}</div>
+                      </div>
+                    </div>
                   );
                 })}
-              </tbody>
-              <tfoot>
-                <tr>
-                  <td colSpan={4} className="pt-3 text-right font-semibold">
-                    Total
-                  </td>
-                  <td className="pt-3 text-right font-semibold">{formatNok(total)}</td>
-                </tr>
-              </tfoot>
-            </table>
-          </div>
-        )}
-      </section>
+
+                <div className="pt-2 flex items-center justify-between">
+                  <div className="text-sm font-semibold text-gray-200">Total</div>
+                  <div className="text-sm font-semibold text-gray-100">{formatNok(total)}</div>
+                </div>
+              </div>
+
+              {/* Desktop: tabell */}
+              <div className="hidden md:block overflow-x-auto">
+                <table className="w-full border-collapse text-sm">
+                  <thead>
+                    <tr className="text-left text-gray-600">
+                      <th className="border-b py-2 pr-3">Produkt</th>
+                      <th className="border-b py-2 pr-3">Navn</th>
+                      <th className="border-b py-2 pr-3 text-right">Antall</th>
+                      <th className="border-b py-2 pr-3 text-right">Pris</th>
+                      <th className="border-b py-2 text-right">Linjesum</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {items.map((x) => {
+                      const line = safeNumber(x.unit_price) * safeNumber(x.qty);
+                      return (
+                        <tr key={x.id} className="align-top">
+                          <td className="border-b py-2 pr-3 font-medium">{x.product_no}</td>
+                          <td className="border-b py-2 pr-3">{x.name}</td>
+                          <td className="border-b py-2 pr-3 text-right">{x.qty}</td>
+                          <td className="border-b py-2 pr-3 text-right">{formatNok(safeNumber(x.unit_price))}</td>
+                          <td className="border-b py-2 text-right">{formatNok(line)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                  <tfoot>
+                    <tr>
+                      <td colSpan={4} className="pt-3 text-right font-semibold">
+                        Total
+                      </td>
+                      <td className="pt-3 text-right font-semibold">{formatNok(total)}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            </>
+          )}
+        </section>
+      </div>
     </div>
   );
 }
