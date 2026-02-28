@@ -87,14 +87,10 @@ function tryCountFromUnknownShape(parsed: any): { qtySum: number; lines: number 
   }
 
   // D) nested { cart: ... }
-  if (parsed.cart) {
-    return tryCountFromUnknownShape(parsed.cart);
-  }
+  if (parsed.cart) return tryCountFromUnknownShape(parsed.cart);
 
   // E) nested { data: ... }
-  if (parsed.data) {
-    return tryCountFromUnknownShape(parsed.data);
-  }
+  if (parsed.data) return tryCountFromUnknownShape(parsed.data);
 
   return null;
 }
@@ -108,7 +104,6 @@ function detectCartCountFromStorage(): { count: number; key: string | null } {
     const key = window.localStorage.key(i);
     if (!key) continue;
 
-    // “cart-ish” keys: inneholder cart/handlekurv/kurv (case-insensitive)
     const k = key.toLowerCase();
     if (!(k.includes("cart") || k.includes("kurv") || k.includes("handle"))) continue;
 
@@ -121,7 +116,6 @@ function detectCartCountFromStorage(): { count: number; key: string | null } {
 
     const count = Number(info.qtySum) || 0;
 
-    // Plukk beste kandidat (høyest count, tie-breaker: flest linjer)
     if (!best) {
       best = { count, key };
     } else {
@@ -165,6 +159,7 @@ export default function ProductsPage() {
   const [cartKey, setCartKey] = useState<string | null>(null);
 
   const myEmail = me?.email ? String(me.email).toLowerCase() : "";
+  const myName = me?.display_name ? String(me.display_name).trim() : "";
   const myRole: Role = (me?.role as Role) ?? "kunde";
 
   const canSeeAdmin = myRole === "admin";
@@ -175,7 +170,6 @@ export default function ProductsPage() {
     setCartCount(found.count);
     setCartKey(found.key);
 
-    // nyttig debug akkurat nå
     if (found.key) {
       // eslint-disable-next-line no-console
       console.log("[cart] detected key:", found.key, "count:", found.count);
@@ -189,7 +183,6 @@ export default function ProductsPage() {
     refreshCartCount();
 
     function onStorage(e: StorageEvent) {
-      // Hvis vi vet key, oppdater kun når den endres. Ellers oppdater alltid.
       if (!e.key) return;
       if (!cartKey || e.key === cartKey) refreshCartCount();
     }
@@ -205,7 +198,6 @@ export default function ProductsPage() {
       window.removeEventListener("storage", onStorage);
       window.removeEventListener("cart:updated", onCartUpdated as any);
     };
-    // cartKey med i deps så vi kan “narrow” storage filtering
   }, [cartKey]);
 
   useEffect(() => {
@@ -274,12 +266,14 @@ export default function ProductsPage() {
     return () => {
       alive = false;
     };
-  }, [meLoading, me?.ok, router, supabase]);
+  }, [meLoading, me?.ok, supabase]);
 
   const filtered = useMemo(() => {
     const s = q.trim().toLowerCase();
     if (!s) return products;
-    return products.filter((p) => p.product_no.toLowerCase().includes(s) || p.name.toLowerCase().includes(s));
+    return products.filter(
+      (p) => p.product_no.toLowerCase().includes(s) || p.name.toLowerCase().includes(s)
+    );
   }, [q, products]);
 
   function addLineToCart(p: ProductRow) {
@@ -293,10 +287,8 @@ export default function ProductsPage() {
       1
     );
 
-    // ✅ Oppdater badge umiddelbart
     refreshCartCount();
 
-    // (valgfritt) event for andre komponenter
     try {
       window.dispatchEvent(new Event("cart:updated"));
     } catch {
@@ -306,38 +298,60 @@ export default function ProductsPage() {
 
   if (meLoading || loading) {
     return (
-      <div className="p-6">
+      <div className={cn("min-h-screen p-6", "bg-gray-950 text-gray-100 md:bg-white md:text-gray-900")}>
         <div className="text-xl font-semibold">Produktsøk</div>
-        <p className="mt-2 text-sm text-gray-600">Laster…</p>
+        <p className="mt-2 text-sm text-gray-400 md:text-gray-600">Laster…</p>
       </div>
     );
   }
 
   if (!me?.ok) {
     return (
-      <div className="p-6 space-y-3">
-        <div className="rounded-2xl border p-5 text-sm text-gray-700">Du har ikke tilgang. Logg inn på nytt.</div>
-        <button className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50" onClick={() => router.push("/login")}>
+      <div className={cn("min-h-screen p-6 space-y-3", "bg-gray-950 text-gray-100 md:bg-white md:text-gray-900")}>
+        <div className={cn("rounded-2xl border p-5 text-sm", "border-gray-800 bg-gray-900 md:border-gray-200 md:bg-white md:text-gray-700")}>
+          Du har ikke tilgang. Logg inn på nytt.
+        </div>
+        <button
+          className={cn(
+            "rounded-xl border px-3 py-2 text-sm",
+            "border-gray-700 bg-gray-900 text-gray-100 hover:bg-gray-800",
+            "md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50"
+          )}
+          onClick={() => router.push("/login")}
+        >
           Til innlogging
         </button>
       </div>
     );
   }
 
+  const display = myName || myEmail || "Bruker";
+
   return (
-    <div className="min-h-screen bg-white">
+    <div className="min-h-screen bg-gray-950 text-gray-100 md:bg-white md:text-gray-900">
       {/* Topbar */}
-      <div className="sticky top-0 z-10 border-b bg-white/80 backdrop-blur">
-        <div className="mx-auto max-w-5xl px-6 py-3">
+      <div className="sticky top-0 z-10 border-b border-gray-800 bg-gray-950/95 backdrop-blur md:border-gray-200 md:bg-white/80">
+        <div className="mx-auto max-w-5xl px-4 md:px-6 py-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <button className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50" onClick={() => router.push("/orders")}>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                className={cn(
+                  "rounded-xl border px-3 py-2 text-sm",
+                  "border-gray-700 bg-gray-900 text-gray-100 hover:bg-gray-800",
+                  "md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50"
+                )}
+                onClick={() => router.push("/orders")}
+              >
                 Mine ordrer
               </button>
 
-              {/* ✅ Handlevogn ikon + counter */}
+              {/* Handlevogn */}
               <button
-                className="relative rounded-lg border px-3 py-2 text-sm hover:bg-gray-50"
+                className={cn(
+                  "relative rounded-xl border px-3 py-2 text-sm",
+                  "border-gray-700 bg-gray-900 text-gray-100 hover:bg-gray-800",
+                  "md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50"
+                )}
                 onClick={() => router.push("/cart")}
                 title="Handlevogn"
                 aria-label={`Handlevogn. ${cartCount} varer.`}
@@ -349,12 +363,9 @@ export default function ProductsPage() {
 
                 <span
                   className={cn(
-                    "absolute -right-2 -top-2",
-                    "min-w-[18px] h-[18px] px-1",
-                    "rounded-full",
-                    cartCount > 0 ? "bg-black text-white" : "bg-gray-200 text-gray-700",
-                    "text-[11px] leading-[18px] text-center",
-                    "shadow-sm"
+                    "absolute -right-2 -top-2 min-w-[18px] h-[18px] px-1 rounded-full",
+                    cartCount > 0 ? "bg-white text-black" : "bg-gray-800 text-gray-200",
+                    "text-[11px] leading-[18px] text-center shadow-sm"
                   )}
                 >
                   {cartCount > 99 ? "99+" : cartCount}
@@ -363,7 +374,11 @@ export default function ProductsPage() {
 
               {canSeePurchasing ? (
                 <button
-                  className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50"
+                  className={cn(
+                    "rounded-xl border px-3 py-2 text-sm",
+                    "border-gray-700 bg-gray-900 text-gray-100 hover:bg-gray-800",
+                    "md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50"
+                  )}
                   onClick={() => router.push("/purchasing")}
                   title="Innkjøper"
                 >
@@ -373,7 +388,11 @@ export default function ProductsPage() {
 
               {canSeeAdmin ? (
                 <button
-                  className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50"
+                  className={cn(
+                    "rounded-xl border px-3 py-2 text-sm",
+                    "border-gray-700 bg-gray-900 text-gray-100 hover:bg-gray-800",
+                    "md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50"
+                  )}
                   onClick={() => router.push("/admin/products")}
                   title="Admin"
                 >
@@ -383,7 +402,11 @@ export default function ProductsPage() {
 
               {canSeeAdmin ? (
                 <button
-                  className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50"
+                  className={cn(
+                    "rounded-xl border px-3 py-2 text-sm",
+                    "border-gray-700 bg-gray-900 text-gray-100 hover:bg-gray-800",
+                    "md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50"
+                  )}
                   onClick={() => router.push("/access")}
                   title="Tilgangsstyring"
                 >
@@ -392,40 +415,57 @@ export default function ProductsPage() {
               ) : null}
             </div>
 
-            <div className="text-sm font-medium text-gray-700">
+            <div className="text-sm font-medium text-gray-100 md:text-gray-700">
               Produkter ({filtered.length})
-              {myEmail ? <span className="ml-2 text-xs text-gray-400">{myEmail} · {myRole}</span> : null}
+              <span className="ml-2 text-xs text-gray-400 md:text-gray-500">
+                {display} · {myRole}
+              </span>
             </div>
           </div>
         </div>
       </div>
 
       {/* Content */}
-      <div className="mx-auto max-w-5xl p-6 space-y-4">
+      <div className="mx-auto max-w-5xl p-4 md:p-6 space-y-4">
         {/* Header + search */}
         <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div>
-            <h1 className="text-2xl font-semibold">Produktsøk</h1>
-            <p className="mt-1 text-sm text-gray-600">Søk på produkt-ID eller navn.</p>
+            <h1 className="text-2xl font-semibold text-white md:text-gray-900">Produktsøk</h1>
+            <p className="mt-1 text-sm text-gray-400 md:text-gray-600">
+              Søk på produkt-ID eller navn.
+            </p>
           </div>
 
           <div className="w-full sm:max-w-md">
-            <label className="block text-xs font-medium text-gray-600">Søk</label>
+            <label className="block text-xs font-medium text-gray-200 md:text-gray-600">Søk</label>
             <input
               value={q}
               onChange={(e) => setQ(e.target.value)}
               placeholder="Søk…"
-              className="mt-1 w-full rounded-xl border px-3 py-2 text-sm outline-none focus:border-gray-400"
+              className={cn(
+                "mt-1 w-full rounded-xl border px-3 py-2 text-sm outline-none",
+                "border-gray-700 bg-gray-900 text-gray-100 placeholder:text-gray-500 focus:border-gray-500",
+                "md:border-gray-300 md:bg-white md:text-gray-900 md:placeholder:text-gray-400 md:focus:border-gray-400"
+              )}
             />
           </div>
         </div>
 
         {filtered.length === 0 ? (
-          <div className="rounded-2xl border p-5 text-sm text-gray-600">Ingen treff.</div>
+          <div
+            className={cn(
+              "rounded-2xl border p-5 text-sm",
+              "border-gray-800 bg-gray-900 text-gray-200",
+              "md:border-gray-200 md:bg-white md:text-gray-700"
+            )}
+          >
+            Ingen treff.
+          </div>
         ) : (
           <ul className="space-y-2">
             {filtered.map((p) => {
-              const imgUrl = p.thumb_path && thumbUrlByPath[p.thumb_path] ? thumbUrlByPath[p.thumb_path] : null;
+              const imgUrl =
+                p.thumb_path && thumbUrlByPath[p.thumb_path] ? thumbUrlByPath[p.thumb_path] : null;
 
               return (
                 <li key={p.id}>
@@ -441,21 +481,25 @@ export default function ProductsPage() {
                     }}
                     className={cn(
                       "group w-full text-left cursor-pointer",
-                      "rounded-2xl border bg-white",
-                      "px-4 py-3",
-                      "transition",
-                      "hover:shadow-sm hover:border-gray-300 hover:bg-gray-50/60",
-                      "focus:outline-none focus:ring-2 focus:ring-gray-300"
+                      "rounded-2xl border border-gray-800 bg-gray-900",
+                      "px-4 py-3 transition",
+                      "hover:border-gray-700 hover:bg-gray-800",
+                      "focus:outline-none focus:ring-2 focus:ring-gray-700",
+                      "md:border-gray-200 md:bg-white",
+                      "md:hover:border-gray-300 md:hover:bg-gray-50/60",
+                      "md:focus:ring-gray-300"
                     )}
                   >
                     <div className="flex items-center gap-3">
                       <div className="shrink-0">
                         <div
                           className={cn(
-                            "overflow-hidden rounded-md border bg-gray-50",
+                            "overflow-hidden rounded-md border",
                             "transition-all duration-200",
                             "h-10 w-10",
-                            "group-hover:h-14 group-hover:w-14 group-hover:rounded-lg group-hover:shadow-sm"
+                            "border-gray-700 bg-gray-950",
+                            "group-hover:h-14 group-hover:w-14 group-hover:rounded-lg group-hover:shadow-sm",
+                            "md:border-gray-200 md:bg-gray-50"
                           )}
                         >
                           {imgUrl ? (
@@ -464,10 +508,12 @@ export default function ProductsPage() {
                               src={imgUrl}
                               alt={p.name}
                               loading="lazy"
-                              className={cn("block h-full w-full object-cover", "transition-all duration-200")}
+                              className="block h-full w-full object-cover"
                             />
                           ) : (
-                            <div className="flex h-full w-full items-center justify-center text-[10px] text-gray-400">—</div>
+                            <div className="flex h-full w-full items-center justify-center text-[10px] text-gray-500">
+                              —
+                            </div>
                           )}
                         </div>
                       </div>
@@ -475,10 +521,13 @@ export default function ProductsPage() {
                       <div className="min-w-0 flex-1">
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0">
-                            <div className="text-xs text-gray-500 font-mono">{p.product_no}</div>
+                            <div className="text-xs font-mono text-gray-400 md:text-gray-500">
+                              {p.product_no}
+                            </div>
                             <div
                               className={cn(
-                                "truncate font-medium text-gray-900",
+                                "truncate font-medium",
+                                "text-gray-100 md:text-gray-900",
                                 "transition-transform duration-200",
                                 "group-hover:translate-x-[1px]"
                               )}
@@ -491,7 +540,8 @@ export default function ProductsPage() {
                           <div className="flex items-center gap-3">
                             <div
                               className={cn(
-                                "shrink-0 text-sm font-semibold text-gray-900",
+                                "shrink-0 text-sm font-semibold",
+                                "text-gray-100 md:text-gray-900",
                                 "transition-transform duration-200",
                                 "group-hover:scale-[1.01]"
                               )}
@@ -502,10 +552,9 @@ export default function ProductsPage() {
                             <button
                               type="button"
                               className={cn(
-                                "shrink-0",
-                                "rounded-lg border border-black bg-black px-3 py-2",
-                                "text-xs font-semibold text-white",
-                                "hover:opacity-90",
+                                "shrink-0 rounded-lg px-3 py-2 text-xs font-semibold",
+                                "border border-white/10 bg-white/10 text-white hover:bg-white/15",
+                                "md:border-black md:bg-black md:text-white md:hover:opacity-90",
                                 "focus:outline-none focus:ring-2 focus:ring-gray-300"
                               )}
                               onClick={(e) => {
@@ -520,7 +569,9 @@ export default function ProductsPage() {
                           </div>
                         </div>
 
-                        <div className="mt-1 text-xs text-gray-500">Klikk for detaljer</div>
+                        <div className="mt-1 text-xs text-gray-400 md:text-gray-500">
+                          Klikk for detaljer
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -531,7 +582,7 @@ export default function ProductsPage() {
         )}
 
         {/* Debug (kan fjernes senere) */}
-        <div className="text-[11px] text-gray-400">
+        <div className="text-[11px] text-gray-500 md:text-gray-400">
           Cart key: {cartKey ?? "—"} · Count: {cartCount}
         </div>
       </div>
