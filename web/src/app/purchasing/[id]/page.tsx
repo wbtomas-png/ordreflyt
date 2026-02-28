@@ -45,7 +45,9 @@ const STATUSES = [
   "CANCELLED",
 ] as const;
 
-const STATUS_LABEL: Record<(typeof STATUSES)[number], string> = {
+type Status = (typeof STATUSES)[number];
+
+const STATUS_LABEL: Record<Status, string> = {
   SUBMITTED: "Submitted",
   IN_REVIEW: "In review",
   ORDERED: "Ordered",
@@ -59,11 +61,17 @@ function cn(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(" ");
 }
 
-function formatDateOnly(value: string | null | undefined) {
+function isStatus(x: unknown): x is Status {
+  return typeof x === "string" && (STATUSES as readonly string[]).includes(x);
+}
+
+function formatDateTime(value: string | null | undefined) {
   if (!value) return "";
-  const d = new Date(value);
-  if (!Number.isFinite(d.getTime())) return String(value);
-  return d.toLocaleDateString("nb-NO");
+  try {
+    return new Date(value).toLocaleString("nb-NO");
+  } catch {
+    return String(value);
+  }
 }
 
 function normEmail(s: unknown) {
@@ -102,23 +110,22 @@ export default function PurchasingOrderPage() {
 
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
 
   const [myEmail, setMyEmail] = useState("");
   const [myName, setMyName] = useState("");
   const [myRole, setMyRole] = useState<Role>("kunde");
-
   const roleOk = myRole === "admin" || myRole === "innkjøper";
 
   const [order, setOrder] = useState<OrderRow | null>(null);
 
-  const [status, setStatus] = useState<(typeof STATUSES)[number]>("SUBMITTED");
+  const [status, setStatus] = useState<Status>("SUBMITTED");
   const [eta, setEta] = useState("");
   const [info, setInfo] = useState("");
   const [confirmPath, setConfirmPath] = useState("");
   const [note, setNote] = useState("");
 
   const [busy, setBusy] = useState(false);
-  const [toast, setToast] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -133,6 +140,7 @@ export default function PurchasingOrderPage() {
         return;
       }
 
+      // access token til /api/auth/me
       let token: string | null = null;
       const { data: sess } = await supabase.auth.getSession();
       token = sess.session?.access_token ?? null;
@@ -175,8 +183,8 @@ export default function PurchasingOrderPage() {
         return;
       }
 
-      // hent ordre (bruk maybeSingle + runtime guard)
-      const sel = [
+      // hent ordre (runtime guard, ingen "as OrderRow" som TS krangler med)
+      const selectWithUpdated = [
         "id",
         "created_at",
         "status",
@@ -197,7 +205,38 @@ export default function PurchasingOrderPage() {
         "updated_by_name",
       ].join(", ");
 
-      const res = await supabase.from("orders").select(sel).eq("id", id).maybeSingle();
+      const selectBase = [
+        "id",
+        "created_at",
+        "status",
+        "project_name",
+        "project_no",
+        "contact_name",
+        "contact_phone",
+        "contact_email",
+        "delivery_address",
+        "delivery_postcode",
+        "delivery_city",
+        "comment",
+        "expected_delivery_date",
+        "delivery_info",
+        "confirmation_file_path",
+        "purchaser_note",
+      ].join(", ");
+
+      let res = await supabase
+        .from("orders")
+        .select(selectWithUpdated)
+        .eq("id", id)
+        .maybeSingle();
+
+      if (
+        res.error &&
+        (looksLikeMissingColumn(res.error, "updated_at") ||
+          looksLikeMissingColumn(res.error, "updated_by_name"))
+      ) {
+        res = await supabase.from("orders").select(selectBase).eq("id", id).maybeSingle();
+      }
 
       if (!alive) return;
 
@@ -222,8 +261,8 @@ export default function PurchasingOrderPage() {
 
       setOrder(o);
 
-      const st = (String(o.status || "SUBMITTED") as any) as (typeof STATUSES)[number];
-      setStatus((STATUSES as readonly string[]).includes(st) ? st : "SUBMITTED");
+      const st = isStatus(o.status) ? (o.status as Status) : "SUBMITTED";
+      setStatus(st);
 
       setEta(o.expected_delivery_date ?? "");
       setInfo(o.delivery_info ?? "");
@@ -247,7 +286,7 @@ export default function PurchasingOrderPage() {
       const nowIso = new Date().toISOString();
 
       const basePayload: Record<string, any> = {
-        status: status || "SUBMITTED",
+        status, // alltid string, aldri null
         expected_delivery_date: eta || null,
         delivery_info: info || null,
         confirmation_file_path: confirmPath || null,
@@ -264,7 +303,7 @@ export default function PurchasingOrderPage() {
           looksLikeMissingColumn(upd.error, "updated_at"))
       ) {
         const fallbackPayload = {
-          status: status || "SUBMITTED",
+          status,
           expected_delivery_date: eta || null,
           delivery_info: info || null,
           confirmation_file_path: confirmPath || null,
@@ -280,9 +319,6 @@ export default function PurchasingOrderPage() {
         return;
       }
 
-      setToast("Lagret");
-      window.setTimeout(() => setToast(null), 1200);
-
       setOrder((prev) =>
         prev
           ? {
@@ -297,18 +333,15 @@ export default function PurchasingOrderPage() {
             }
           : prev
       );
+
+      setToast("Lagret");
+      window.setTimeout(() => setToast(null), 1200);
     } finally {
       setBusy(false);
     }
   }
 
-  if (loading) {
-    return (
-      <div className="p-6">
-        <p className="text-sm text-gray-600">Laster…</p>
-      </div>
-    );
-  }
+  if (loading) return <div className="p-6">Laster…</div>;
 
   if (!roleOk) {
     return (
@@ -345,103 +378,172 @@ export default function PurchasingOrderPage() {
     );
   }
 
+  // Mobil mørk, desktop lys (samme prinsipp som index-siden)
   return (
-    <div className="p-6 space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <button
-          className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50"
-          onClick={() => router.push("/purchasing")}
-        >
-          ← Tilbake til innkjøperliste
-        </button>
-
-        <div className="text-xs text-gray-500">
-          {myName} · {myRole} · {myEmail}
-        </div>
-      </div>
-
-      <div className="space-y-1">
-        <h1 className="text-xl font-semibold">{order.project_name}</h1>
-        <div className="text-sm text-gray-600">
-          Opprettet: {formatDateOnly(order.created_at)}
-          {order.project_no ? ` · Prosjekt nr: ${order.project_no}` : ""}
-        </div>
-      </div>
-
-      {err ? (
-        <div className="rounded-xl border bg-white px-4 py-3 text-sm text-red-700">{err}</div>
-      ) : null}
-      {toast ? (
-        <div className="rounded-xl border bg-white px-4 py-3 text-sm text-green-700">{toast}</div>
-      ) : null}
-
-      <div className="grid gap-4 rounded-xl border p-4 bg-white">
-        <label className="text-sm">
-          Status
-          <select
-            className="mt-1 w-full rounded-lg border px-3 py-2 bg-white"
-            value={status}
-            onChange={(e) => setStatus(e.target.value as any)}
+    <div
+      className={cn(
+        "min-h-screen p-4 md:p-6",
+        "bg-gray-950 text-gray-100 md:bg-gray-50 md:text-gray-900"
+      )}
+    >
+      <div className="mx-auto max-w-3xl space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <button
+            className={cn(
+              "rounded-lg border px-3 py-2 text-sm",
+              "border-gray-700 hover:bg-gray-900 md:border-gray-300 md:hover:bg-white"
+            )}
+            onClick={() => router.push("/purchasing")}
           >
-            {STATUSES.map((s) => (
-              <option key={s} value={s}>
-                {STATUS_LABEL[s]}
-              </option>
-            ))}
-          </select>
-        </label>
+            ← Tilbake til innkjøperliste
+          </button>
 
-        <label className="text-sm">
-          ETA (YYYY-MM-DD)
-          <input
-            className={cn("mt-1 w-full rounded-lg border px-3 py-2")}
-            value={eta}
-            onChange={(e) => setEta(e.target.value)}
-            placeholder="2026-02-28"
-            inputMode="numeric"
-          />
-        </label>
-
-        <label className="text-sm">
-          Leveringsinfo (til bestiller)
-          <textarea
-            className="mt-1 w-full rounded-lg border px-3 py-2"
-            rows={3}
-            value={info}
-            onChange={(e) => setInfo(e.target.value)}
-          />
-        </label>
-
-        <label className="text-sm">
-          Ordrebekreftelse sti (relativ)
-          <input
-            className="mt-1 w-full rounded-lg border px-3 py-2"
-            value={confirmPath}
-            onChange={(e) => setConfirmPath(e.target.value)}
-            placeholder="uploads/orders/ORDER-123.pdf"
-          />
-          <div className="mt-1 text-xs text-gray-600">
-            (Dette er fortsatt “local-file”-opplegget ditt. Senere kan vi bytte til Supabase Storage.)
+          <div className="text-xs text-gray-300 md:text-gray-600">
+            {myName || myEmail} · {myRole}
           </div>
-        </label>
+        </div>
 
-        <label className="text-sm">
-          Innkjøpernotat (internt)
-          <textarea
-            className="mt-1 w-full rounded-lg border px-3 py-2"
-            rows={3}
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-          />
-        </label>
+        {err ? (
+          <div className="rounded-xl border border-red-700/40 bg-red-950/40 px-4 py-3 text-sm text-red-200 md:border-red-200 md:bg-white md:text-red-700">
+            {err}
+          </div>
+        ) : null}
 
-        <button
-          disabled={busy}
-          onClick={saveChanges}
-          className="rounded-lg bg-black px-4 py-2 text-white disabled:opacity-50 hover:opacity-90"
+        {toast ? (
+          <div className="rounded-xl border border-emerald-700/40 bg-emerald-950/40 px-4 py-3 text-sm text-emerald-200 md:border-emerald-200 md:bg-white md:text-emerald-700">
+            {toast}
+          </div>
+        ) : null}
+
+        <div
+          className={cn(
+            "rounded-2xl border p-4 space-y-3",
+            "border-gray-800 bg-gray-900/40 md:border-gray-200 md:bg-white"
+          )}
         >
-          {busy ? "Lagrer…" : "Lagre endringer"}
-        </button>
+          <div className="space-y-1">
+            <h1 className="text-xl font-semibold">{order.project_name}</h1>
+            <div className="text-sm text-gray-300 md:text-gray-600">
+              Opprettet: {formatDateTime(order.created_at)}
+              {order.project_no ? ` · Prosjekt nr: ${order.project_no}` : ""}
+            </div>
+            <div className="text-sm text-gray-200 md:text-gray-700">
+              Bestiller/kunde: <span className="font-medium">{order.contact_name}</span>
+              {order.contact_email ? (
+                <span className="text-gray-400 md:text-gray-500"> · {order.contact_email}</span>
+              ) : null}
+            </div>
+
+            <div className="text-xs text-gray-400 md:text-gray-500">
+              Levering: {order.delivery_address}
+              {order.delivery_postcode ? `, ${order.delivery_postcode}` : ""}
+              {order.delivery_city ? ` ${order.delivery_city}` : ""}
+            </div>
+
+            {order.updated_at ? (
+              <div className="text-xs text-gray-400 md:text-gray-500">
+                Sist endret: {formatDateTime(order.updated_at)}
+                {order.updated_by_name ? ` · ${order.updated_by_name}` : ""}
+              </div>
+            ) : null}
+          </div>
+
+          <div className="grid gap-3">
+            <label className="text-sm">
+              Status
+              <select
+                className={cn(
+                  "mt-1 w-full rounded-xl border px-3 py-2 text-sm outline-none",
+                  "border-gray-700 bg-gray-950 text-gray-100 focus:border-gray-500",
+                  "md:border-gray-300 md:bg-white md:text-gray-900"
+                )}
+                value={status}
+                onChange={(e) => setStatus(e.target.value as Status)}
+              >
+                {STATUSES.map((s) => (
+                  <option key={s} value={s}>
+                    {STATUS_LABEL[s]}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="text-sm">
+              ETA (YYYY-MM-DD)
+              <input
+                className={cn(
+                  "mt-1 w-full rounded-xl border px-3 py-2 text-sm outline-none",
+                  "border-gray-700 bg-gray-950 text-gray-100 placeholder:text-gray-500 focus:border-gray-500",
+                  "md:border-gray-300 md:bg-white md:text-gray-900 md:placeholder:text-gray-400"
+                )}
+                value={eta}
+                onChange={(e) => setEta(e.target.value)}
+                placeholder="2026-02-28"
+                inputMode="numeric"
+              />
+            </label>
+
+            <label className="text-sm">
+              Leveringsinfo (til bestiller)
+              <textarea
+                className={cn(
+                  "mt-1 w-full rounded-xl border px-3 py-2 text-sm outline-none",
+                  "border-gray-700 bg-gray-950 text-gray-100 placeholder:text-gray-500 focus:border-gray-500",
+                  "md:border-gray-300 md:bg-white md:text-gray-900"
+                )}
+                rows={3}
+                value={info}
+                onChange={(e) => setInfo(e.target.value)}
+              />
+            </label>
+
+            <label className="text-sm">
+              Ordrebekreftelse sti (relativ)
+              <input
+                className={cn(
+                  "mt-1 w-full rounded-xl border px-3 py-2 text-sm outline-none",
+                  "border-gray-700 bg-gray-950 text-gray-100 placeholder:text-gray-500 focus:border-gray-500",
+                  "md:border-gray-300 md:bg-white md:text-gray-900 md:placeholder:text-gray-400"
+                )}
+                value={confirmPath}
+                onChange={(e) => setConfirmPath(e.target.value)}
+                placeholder="uploads/orders/ORDER-123.pdf"
+              />
+              <div className="mt-1 text-xs text-gray-400 md:text-gray-500">
+                (Senere kan vi flytte dette til Supabase Storage.)
+              </div>
+            </label>
+
+            <label className="text-sm">
+              Innkjøpernotat (internt)
+              <textarea
+                className={cn(
+                  "mt-1 w-full rounded-xl border px-3 py-2 text-sm outline-none",
+                  "border-gray-700 bg-gray-950 text-gray-100 placeholder:text-gray-500 focus:border-gray-500",
+                  "md:border-gray-300 md:bg-white md:text-gray-900"
+                )}
+                rows={3}
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+              />
+            </label>
+
+            <button
+              disabled={busy}
+              onClick={saveChanges}
+              className={cn(
+                "rounded-lg px-4 py-2 text-sm font-medium disabled:opacity-50",
+                "bg-white/10 hover:bg-white/15 md:bg-black md:text-white md:hover:opacity-90"
+              )}
+            >
+              {busy ? "Lagrer…" : "Lagre endringer"}
+            </button>
+          </div>
+        </div>
+
+        <div className="text-xs text-gray-400 md:text-gray-500">
+          Status-visning: <span className="font-medium">{STATUS_LABEL[status]}</span>
+        </div>
       </div>
     </div>
   );
