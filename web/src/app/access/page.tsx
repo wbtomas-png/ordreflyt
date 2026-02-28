@@ -24,6 +24,10 @@ const ROLE_LABEL: Record<Role, string> = {
   innkjøper: "Innkjøper",
 };
 
+function safeText(s: unknown) {
+  return String(s ?? "").trim();
+}
+
 export default function AccessPage() {
   const router = useRouter();
   const supabase = useMemo(() => supabaseBrowser(), []);
@@ -43,12 +47,8 @@ export default function AccessPage() {
   const [busy, setBusy] = useState(false);
 
   // inline edits
-  const [roleDraftByEmail, setRoleDraftByEmail] = useState<Record<string, Role>>(
-    {}
-  );
-  const [nameDraftByEmail, setNameDraftByEmail] = useState<Record<string, string>>(
-    {}
-  );
+  const [roleDraftByEmail, setRoleDraftByEmail] = useState<Record<string, Role>>({});
+  const [nameDraftByEmail, setNameDraftByEmail] = useState<Record<string, string>>({});
   const [savingEmail, setSavingEmail] = useState<string | null>(null);
 
   function showToast(msg: string) {
@@ -57,7 +57,8 @@ export default function AccessPage() {
   }
 
   async function authHeader(): Promise<string | null> {
-    const { data } = await supabase.auth.getSession();
+    const { data, error } = await supabase.auth.getSession();
+    if (error) console.error(error);
     const token = data.session?.access_token ?? null;
     return token ? `Bearer ${token}` : null;
   }
@@ -116,6 +117,7 @@ export default function AccessPage() {
 
     const e = email.trim().toLowerCase();
     const n = displayName.trim();
+
     if (!e) return;
 
     setBusy(true);
@@ -155,15 +157,15 @@ export default function AccessPage() {
       return;
     }
 
+    const ok = confirm(`Fjerne ${e} fra allowlist?`);
+    if (!ok) return;
+
     setBusy(true);
     try {
-      const res = await fetch(
-        `/api/admin/allowlist?email=${encodeURIComponent(e)}`,
-        {
-          method: "DELETE",
-          headers: { authorization: auth },
-        }
-      );
+      const res = await fetch(`/api/admin/allowlist?email=${encodeURIComponent(e)}`, {
+        method: "DELETE",
+        headers: { authorization: auth },
+      });
 
       const data = await res.json().catch(() => null);
       if (!res.ok || !data?.ok) {
@@ -223,61 +225,83 @@ export default function AccessPage() {
   }, [loading, me]);
 
   if (loading) {
-    return <div className="p-6 text-sm text-gray-600">Laster…</div>;
+    return (
+      <div className="min-h-screen bg-gray-950 text-gray-100 md:bg-white md:text-gray-900 p-6 text-sm">
+        Laster…
+      </div>
+    );
   }
 
   // Hooken redirecter ved feil rolle, så her er vi admin
   const canUse = Boolean(me);
+  const meName = safeText(me?.display_name) || safeText(me?.email);
+
+  const pageBg = "bg-gray-950 text-gray-100 md:bg-white md:text-gray-900";
+  const card = "rounded-2xl border border-gray-800 bg-gray-900/40 md:border-gray-200 md:bg-white";
+  const input =
+    "w-full rounded-xl border px-3 py-2 text-sm outline-none " +
+    "border-gray-800 bg-gray-900 text-gray-100 placeholder:text-gray-500 focus:border-gray-600 " +
+    "md:border-gray-300 md:bg-white md:text-gray-900 md:placeholder:text-gray-400 md:focus:border-gray-400";
+  const select =
+    "w-full rounded-xl border px-3 py-2 text-sm outline-none " +
+    "border-gray-800 bg-gray-900 text-gray-100 focus:border-gray-600 " +
+    "md:border-gray-300 md:bg-white md:text-gray-900 md:focus:border-gray-400";
+  const btn =
+    "rounded-xl border px-4 py-2 text-sm disabled:opacity-50 " +
+    "border-gray-800 bg-gray-900 text-gray-100 hover:bg-gray-800 " +
+    "md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50";
 
   return (
-    <div className="min-h-screen bg-white">
-      <div className="sticky top-0 z-10 border-b bg-white/80 backdrop-blur">
-        <div className="mx-auto max-w-3xl px-6 py-3 flex items-center justify-between">
-          <div className="text-sm font-medium text-gray-700">Tilgangsstyring</div>
+    <div className={cn("min-h-screen", pageBg)}>
+      {/* Topbar */}
+      <div className="sticky top-0 z-10 border-b border-gray-800 bg-gray-950/95 backdrop-blur md:border-gray-200 md:bg-white/80">
+        <div className="mx-auto flex max-w-3xl items-center justify-between gap-3 px-4 py-3 md:px-6">
+          <div className="text-sm font-medium text-gray-200 md:text-gray-700">Tilgangsstyring</div>
 
           <div className="flex items-center gap-2">
-            {me?.display_name || me?.email ? (
-              <div className="text-xs text-gray-500">
-                {(me.display_name ?? me.email) || ""} · {me.role}
+            {meName ? (
+              <div className="hidden sm:block text-xs text-gray-400 md:text-gray-500">
+                {meName} · {me?.role}
               </div>
             ) : null}
 
-            <button
-              className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50"
-              onClick={() => router.push("/products")}
-            >
+            <button className={btn} onClick={() => router.push("/products")}>
               Til produkter
             </button>
           </div>
         </div>
       </div>
 
-      <div className="mx-auto max-w-3xl p-6 space-y-4">
-        <div className="rounded-2xl border p-5 space-y-3">
-          <div className="flex items-center justify-between gap-3">
+      {/* Content */}
+      <div className="mx-auto max-w-3xl space-y-4 p-4 md:p-6">
+        {/* Header card */}
+        <div className={cn(card, "p-5 space-y-3")}>
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="text-sm font-semibold">Allowlist</div>
-            <button
-              onClick={load}
-              disabled={!canUse || busy}
-              className={cn(
-                "rounded-xl border px-4 py-2 text-sm",
-                "hover:bg-gray-50 disabled:opacity-50"
-              )}
-              title="Oppdater liste"
-            >
+            <button onClick={load} disabled={!canUse || busy} className={btn} title="Oppdater liste">
               {busy ? "Oppdaterer…" : "Oppdater"}
             </button>
           </div>
 
-          {err ? <div className="text-sm text-red-600">{err}</div> : null}
-          {toast ? <div className="text-sm text-green-700">{toast}</div> : null}
+          {err ? (
+            <div className="rounded-xl border border-red-700/40 bg-red-950/30 px-4 py-3 text-sm text-red-200 md:border-red-200 md:bg-white md:text-red-700">
+              {err}
+            </div>
+          ) : null}
 
-          <div className="text-xs text-gray-500">
+          {toast ? (
+            <div className="rounded-xl border border-emerald-700/40 bg-emerald-950/30 px-4 py-3 text-sm text-emerald-200 md:border-emerald-200 md:bg-white md:text-emerald-700">
+              {toast}
+            </div>
+          ) : null}
+
+          <div className="text-xs text-gray-400 md:text-gray-500">
             Kun admin-brukere har tilgang til denne siden. Ingen ekstra passord brukes.
           </div>
         </div>
 
-        <div className="rounded-2xl border p-5 space-y-3">
+        {/* Add user */}
+        <div className={cn(card, "p-5 space-y-3")}>
           <div className="text-sm font-semibold">Legg til bruker</div>
 
           <div className="grid gap-2 sm:grid-cols-[1fr_1fr_170px_110px]">
@@ -285,20 +309,23 @@ export default function AccessPage() {
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               placeholder="navn@firma.no"
-              className="w-full rounded-xl border px-3 py-2 text-sm outline-none focus:border-gray-400"
+              className={input}
+              inputMode="email"
+              autoComplete="email"
             />
 
             <input
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
-              placeholder="Brukernavn (visningsnavn)"
-              className="w-full rounded-xl border px-3 py-2 text-sm outline-none focus:border-gray-400"
+              placeholder="Visningsnavn"
+              className={input}
+              autoComplete="name"
             />
 
             <select
               value={newRole}
               onChange={(e) => setNewRole(e.target.value as Role)}
-              className="w-full rounded-xl border px-3 py-2 text-sm outline-none focus:border-gray-400 bg-white"
+              className={select}
               title="Rolle"
             >
               <option value="kunde">Kunde</option>
@@ -306,26 +333,22 @@ export default function AccessPage() {
               <option value="admin">Admin</option>
             </select>
 
-            <button
-              onClick={addEmail}
-              disabled={!canUse || busy}
-              className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50 disabled:opacity-50"
-            >
+            <button onClick={addEmail} disabled={!canUse || busy} className={btn}>
               Legg til
             </button>
           </div>
 
-          <div className="text-xs text-gray-500">
-            Brukernavn vises i systemet (audit / “sist endret”). E-post brukes som
-            fallback hvis navn er tomt.
+          <div className="text-xs text-gray-400 md:text-gray-500">
+            Visningsnavn brukes i UI og audit (“sist endret”). E-post brukes som fallback hvis navn er tomt.
           </div>
         </div>
 
-        <div className="rounded-2xl border p-5">
-          <div className="text-sm font-semibold mb-3">Allowlist ({rows.length})</div>
+        {/* List */}
+        <div className={cn(card, "p-5")}>
+          <div className="mb-3 text-sm font-semibold">Allowlist ({rows.length})</div>
 
           {rows.length === 0 ? (
-            <div className="text-sm text-gray-600">Ingen e-poster.</div>
+            <div className="text-sm text-gray-300 md:text-gray-600">Ingen e-poster.</div>
           ) : (
             <ul className="space-y-2">
               {rows.map((r) => {
@@ -337,19 +360,20 @@ export default function AccessPage() {
                 const saving = savingEmail === r.email;
 
                 return (
-                  <li key={r.email} className="flex flex-col gap-2 rounded-xl border px-3 py-3">
-                    <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                  <li key={r.email} className="rounded-2xl border border-gray-800 bg-gray-950/30 px-4 py-4 md:border-gray-200 md:bg-white">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                       <div className="min-w-0">
-                        <div className="truncate text-sm font-medium">
+                        <div className="truncate text-sm font-medium text-gray-100 md:text-gray-900">
                           {r.display_name?.trim() ? r.display_name : r.email}
                         </div>
-                        <div className="text-xs text-gray-500">
+
+                        <div className="mt-1 text-xs text-gray-400 md:text-gray-500">
                           <span className="font-mono">{r.email}</span>
                           <span className="mx-2">·</span>
                           {new Date(r.created_at).toLocaleString("nb-NO")}
                           <span className="mx-2">·</span>
                           Rolle:{" "}
-                          <span className="font-medium text-gray-700">
+                          <span className="font-medium text-gray-200 md:text-gray-700">
                             {ROLE_LABEL[r.role ?? "kunde"]}
                           </span>
                         </div>
@@ -358,10 +382,10 @@ export default function AccessPage() {
                       <div className="flex flex-wrap items-center gap-2">
                         <button
                           className={cn(
-                            "rounded-lg border px-3 py-2 text-xs",
+                            "rounded-xl px-3 py-2 text-xs",
                             changed
-                              ? "border-black bg-black text-white hover:opacity-90"
-                              : "hover:bg-gray-50",
+                              ? "border border-white/10 bg-white/10 text-white hover:bg-white/15 md:border-black md:bg-black md:text-white md:hover:opacity-90"
+                              : "border border-gray-800 bg-gray-900 text-gray-100 hover:bg-gray-800 md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50",
                             saving ? "opacity-60" : ""
                           )}
                           disabled={!changed || saving}
@@ -372,7 +396,11 @@ export default function AccessPage() {
                         </button>
 
                         <button
-                          className="rounded-lg border px-3 py-2 text-xs hover:bg-gray-50"
+                          className={cn(
+                            "rounded-xl px-3 py-2 text-xs",
+                            "border border-red-700/40 bg-red-950/30 text-red-200 hover:bg-red-950/50",
+                            "md:border-red-200 md:bg-white md:text-red-700 md:hover:bg-red-50"
+                          )}
                           onClick={() => removeEmail(r.email)}
                           disabled={saving}
                           title="Fjern"
@@ -382,7 +410,7 @@ export default function AccessPage() {
                       </div>
                     </div>
 
-                    <div className="grid gap-2 sm:grid-cols-[1fr_170px]">
+                    <div className="mt-3 grid gap-2 sm:grid-cols-[1fr_170px]">
                       <input
                         value={draftName}
                         onChange={(e) =>
@@ -391,8 +419,8 @@ export default function AccessPage() {
                             [r.email]: e.target.value,
                           }))
                         }
-                        placeholder="Brukernavn (visningsnavn)"
-                        className="w-full rounded-xl border px-3 py-2 text-sm outline-none focus:border-gray-400"
+                        placeholder="Visningsnavn"
+                        className={input}
                       />
 
                       <select
@@ -403,7 +431,7 @@ export default function AccessPage() {
                             [r.email]: e.target.value as Role,
                           }))
                         }
-                        className="w-full rounded-xl border px-3 py-2 text-sm outline-none focus:border-gray-400 bg-white"
+                        className={select}
                         title="Endre rolle"
                       >
                         <option value="kunde">Kunde</option>
@@ -416,6 +444,10 @@ export default function AccessPage() {
               })}
             </ul>
           )}
+        </div>
+
+        <div className="text-[11px] text-gray-500 md:text-gray-400">
+          Tips: På mobil er alt “stacked” for å være lett å treffe med tommel. På desktop får du grid/layout.
         </div>
       </div>
     </div>
