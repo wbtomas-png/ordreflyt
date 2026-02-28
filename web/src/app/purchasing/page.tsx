@@ -17,7 +17,9 @@ const STATUSES = [
   "CANCELLED",
 ] as const;
 
-const STATUS_LABEL: Record<(typeof STATUSES)[number], string> = {
+type Status = (typeof STATUSES)[number];
+
+const STATUS_LABEL: Record<Status, string> = {
   SUBMITTED: "Submitted",
   IN_REVIEW: "In review",
   ORDERED: "Ordered",
@@ -26,6 +28,15 @@ const STATUS_LABEL: Record<(typeof STATUSES)[number], string> = {
   DELIVERED: "Delivered",
   CANCELLED: "Cancelled",
 };
+
+function isStatus(x: unknown): x is Status {
+  return typeof x === "string" && (STATUSES as readonly string[]).includes(x);
+}
+
+function statusLabelSafe(x: unknown) {
+  const s: Status = isStatus(x) ? x : "SUBMITTED";
+  return STATUS_LABEL[s];
+}
 
 type OrderRow = {
   id: string;
@@ -39,8 +50,6 @@ type OrderRow = {
   contact_phone: string | null;
   contact_email: string | null;
 
-  // noen systemer har "customer_name" / "ordered_by_name" etc.
-  // vi viser det vi har: contact_name
   delivery_address: string;
   delivery_postcode: string | null;
   delivery_city: string | null;
@@ -55,12 +64,6 @@ type OrderRow = {
 
   updated_at?: string | null;
   updated_by_name?: string | null;
-};
-
-type OrderItemRow = {
-  order_id: string;
-  qty: number;
-  unit_price: number;
 };
 
 type OrderView = OrderRow & {
@@ -154,12 +157,11 @@ export default function PurchasingIndexPage() {
 
   // filters
   const [q, setQ] = useState("");
-  const [status, setStatus] = useState<(typeof STATUSES)[number] | "ALL">("ALL");
+  const [status, setStatus] = useState<Status | "ALL">("ALL");
   const [dateFrom, setDateFrom] = useState<string>(""); // YYYY-MM-DD
   const [dateTo, setDateTo] = useState<string>(""); // YYYY-MM-DD
   const [sort, setSort] = useState<SortKey>("NEWEST");
 
-  // --- auth + load
   useEffect(() => {
     let alive = true;
 
@@ -173,6 +175,7 @@ export default function PurchasingIndexPage() {
         return;
       }
 
+      // get token
       let token: string | null = null;
       const { data: sess } = await supabase.auth.getSession();
       token = sess.session?.access_token ?? null;
@@ -185,6 +188,7 @@ export default function PurchasingIndexPage() {
         return;
       }
 
+      // role + display_name via /api/auth/me
       try {
         const meRes = await fetch("/api/auth/me", {
           method: "GET",
@@ -209,7 +213,6 @@ export default function PurchasingIndexPage() {
         return;
       }
 
-      // load data
       await reloadAll();
 
       if (!alive) return;
@@ -225,9 +228,6 @@ export default function PurchasingIndexPage() {
   async function reloadAll() {
     setErr(null);
 
-    // 1) hent orders
-    // NB: ikke bruk .range() her – vi vil ha alt (Supabase default limit kan bite, men som regel ok).
-    // Hvis dere får >1000 rader, må vi paginere.
     const selectWithUpdated = [
       "id",
       "created_at",
@@ -268,14 +268,15 @@ export default function PurchasingIndexPage() {
       "purchaser_note",
     ].join(", ");
 
-    let ordersRes = await supabase.from("orders").select(selectWithUpdated);
+    // IMPORTANT: if you have more than 1000 rows, add pagination.
+    let ordersRes = await supabaseAny.from("orders").select(selectWithUpdated);
 
     if (
       ordersRes.error &&
       (looksLikeMissingColumn(ordersRes.error, "updated_at") ||
         looksLikeMissingColumn(ordersRes.error, "updated_by_name"))
     ) {
-      ordersRes = await supabase.from("orders").select(selectBase);
+      ordersRes = await supabaseAny.from("orders").select(selectBase);
     }
 
     if (ordersRes.error) {
@@ -291,20 +292,17 @@ export default function PurchasingIndexPage() {
       return;
     }
 
-    // 2) totalpris: prøv nested select først (hvis relationship finnes)
-    // Hvis det feiler, fall back til separat query på order_items.
     const orderIds = orders.map((o) => o.id);
     const totalsById: Record<string, number> = {};
 
+    // Try nested relationship first
     try {
       const nested = await supabaseAny
         .from("orders")
         .select("id, order_items(qty, unit_price)")
         .in("id", orderIds);
 
-      if (nested?.error) {
-        throw nested.error;
-      }
+      if (nested?.error) throw nested.error;
 
       const nestedData: any[] = Array.isArray(nested?.data) ? nested.data : [];
       for (const r of nestedData) {
@@ -319,28 +317,26 @@ export default function PurchasingIndexPage() {
         totalsById[id] = sum;
       }
     } catch {
-      // fallback: separate query (requires order_items table)
+      // Fallback: query order_items directly
       try {
-        const itemsRes = await supabase
+        const itemsRes = await supabaseAny
           .from("order_items")
           .select("order_id, qty, unit_price")
           .in("order_id", orderIds);
 
-        if (!itemsRes.error) {
-          const items = (itemsRes.data ?? []) as unknown;
-          if (Array.isArray(items)) {
-            for (const it of items as any[]) {
-              const oid = String(it?.order_id ?? "");
-              const qty = Number(it?.qty ?? 0);
-              const unit = Number(it?.unit_price ?? 0);
-              if (!oid) continue;
-              if (!Number.isFinite(qty) || !Number.isFinite(unit)) continue;
-              totalsById[oid] = (totalsById[oid] ?? 0) + qty * unit;
-            }
+        if (!itemsRes?.error) {
+          const items: any[] = Array.isArray(itemsRes?.data) ? itemsRes.data : [];
+          for (const it of items) {
+            const oid = String(it?.order_id ?? "");
+            const qty = Number(it?.qty ?? 0);
+            const unit = Number(it?.unit_price ?? 0);
+            if (!oid) continue;
+            if (!Number.isFinite(qty) || !Number.isFinite(unit)) continue;
+            totalsById[oid] = (totalsById[oid] ?? 0) + qty * unit;
           }
         }
       } catch {
-        // ingen totals – ok
+        // ignore
       }
     }
 
@@ -352,26 +348,25 @@ export default function PurchasingIndexPage() {
     setRows(view);
   }
 
-  async function setOrderStatus(orderId: string, newStatus: string) {
+  async function setOrderStatus(orderId: string, newStatus: Status) {
     setErr(null);
 
-    const patch: Record<string, any> = {
+    const nowIso = new Date().toISOString();
+
+    const payloadWithUpdated: Record<string, any> = {
       status: newStatus,
-      updated_at: new Date().toISOString(),
+      updated_at: nowIso,
       updated_by_name: myName || null,
     };
 
-    let upd = await supabaseAny.from("orders").update(patch).eq("id", orderId);
+    let upd = await supabaseAny.from("orders").update(payloadWithUpdated).eq("id", orderId);
 
     if (
       upd.error &&
       (looksLikeMissingColumn(upd.error, "updated_by_name") ||
         looksLikeMissingColumn(upd.error, "updated_at"))
     ) {
-      const fallback = {
-        status: newStatus,
-        updated_at: new Date().toISOString(),
-      };
+      const fallback: Record<string, any> = { status: newStatus, updated_at: nowIso };
       upd = await supabaseAny.from("orders").update(fallback).eq("id", orderId);
     }
 
@@ -381,9 +376,7 @@ export default function PurchasingIndexPage() {
       return;
     }
 
-    setRows((prev) =>
-      prev.map((o) => (o.id === orderId ? { ...o, status: newStatus } : o))
-    );
+    setRows((prev) => prev.map((o) => (o.id === orderId ? { ...o, status: newStatus } : o)));
     setToast("Status lagret");
     window.setTimeout(() => setToast(null), 1000);
   }
@@ -392,11 +385,11 @@ export default function PurchasingIndexPage() {
     setErr(null);
 
     const ok = window.confirm(
-      "Slette ordre permanent?\n\nTips: Hvis dere vil ha sporbarhet, bør vi heller bruke status = CANCELLED enn å slette."
+      "Slette ordre permanent?\n\nTips: Hvis dere vil ha sporbarhet, bruk heller status = CANCELLED enn å slette."
     );
     if (!ok) return;
 
-    // best-effort: slett items først (hvis ingen cascade)
+    // best-effort: delete items first (if no cascade)
     try {
       await supabaseAny.from("order_items").delete().eq("order_id", orderId);
     } catch {
@@ -474,11 +467,14 @@ export default function PurchasingIndexPage() {
     );
   }
 
-  // Mobil mørk, desktop lys:
-  // - base: mørk
-  // - md+: lys
+  // Mobile: dark. Desktop (md+): light.
   return (
-    <div className={cn("min-h-screen p-4 md:p-6", "bg-gray-950 text-gray-100 md:bg-gray-50 md:text-gray-900")}>
+    <div
+      className={cn(
+        "min-h-screen p-4 md:p-6",
+        "bg-gray-950 text-gray-100 md:bg-gray-50 md:text-gray-900"
+      )}
+    >
       <div className="mx-auto max-w-6xl space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="space-y-1">
@@ -528,10 +524,17 @@ export default function PurchasingIndexPage() {
         ) : null}
 
         {/* Filters */}
-        <div className={cn("rounded-2xl border p-4", "border-gray-800 bg-gray-900/40 md:border-gray-200 md:bg-white")}>
+        <div
+          className={cn(
+            "rounded-2xl border p-4",
+            "border-gray-800 bg-gray-900/40 md:border-gray-200 md:bg-white"
+          )}
+        >
           <div className="grid gap-3 md:grid-cols-12">
             <div className="md:col-span-5">
-              <label className="block text-xs font-medium text-gray-200 md:text-gray-600">Søk</label>
+              <label className="block text-xs font-medium text-gray-200 md:text-gray-600">
+                Søk
+              </label>
               <input
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
@@ -545,10 +548,12 @@ export default function PurchasingIndexPage() {
             </div>
 
             <div className="md:col-span-2">
-              <label className="block text-xs font-medium text-gray-200 md:text-gray-600">Status</label>
+              <label className="block text-xs font-medium text-gray-200 md:text-gray-600">
+                Status
+              </label>
               <select
                 value={status}
-                onChange={(e) => setStatus(e.target.value as any)}
+                onChange={(e) => setStatus(e.target.value as Status | "ALL")}
                 className={cn(
                   "mt-1 w-full rounded-xl border px-3 py-2 text-sm outline-none",
                   "border-gray-700 bg-gray-950 text-gray-100 focus:border-gray-500",
@@ -565,7 +570,9 @@ export default function PurchasingIndexPage() {
             </div>
 
             <div className="md:col-span-2">
-              <label className="block text-xs font-medium text-gray-200 md:text-gray-600">Dato fra</label>
+              <label className="block text-xs font-medium text-gray-200 md:text-gray-600">
+                Dato fra
+              </label>
               <input
                 type="date"
                 value={dateFrom}
@@ -579,7 +586,9 @@ export default function PurchasingIndexPage() {
             </div>
 
             <div className="md:col-span-2">
-              <label className="block text-xs font-medium text-gray-200 md:text-gray-600">Dato til</label>
+              <label className="block text-xs font-medium text-gray-200 md:text-gray-600">
+                Dato til
+              </label>
               <input
                 type="date"
                 value={dateTo}
@@ -593,7 +602,9 @@ export default function PurchasingIndexPage() {
             </div>
 
             <div className="md:col-span-1">
-              <label className="block text-xs font-medium text-gray-200 md:text-gray-600">Sort</label>
+              <label className="block text-xs font-medium text-gray-200 md:text-gray-600">
+                Sort
+              </label>
               <select
                 value={sort}
                 onChange={(e) => setSort(e.target.value as SortKey)}
@@ -618,7 +629,12 @@ export default function PurchasingIndexPage() {
 
         {/* List */}
         {filtered.length === 0 ? (
-          <div className={cn("rounded-xl border p-4 text-sm", "border-gray-800 bg-gray-900/40 text-gray-200 md:border-gray-200 md:bg-white md:text-gray-700")}>
+          <div
+            className={cn(
+              "rounded-xl border p-4 text-sm",
+              "border-gray-800 bg-gray-900/40 text-gray-200 md:border-gray-200 md:bg-white md:text-gray-700"
+            )}
+          >
             Ingen ordrer som matcher filteret.
           </div>
         ) : (
@@ -634,38 +650,47 @@ export default function PurchasingIndexPage() {
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div className="space-y-1">
                     <div className="text-xs text-gray-300 md:text-gray-500">
-                      {formatDateTime(o.created_at)} · ID: <span className="font-mono">{o.id}</span>
+                      {formatDateTime(o.created_at)} · ID:{" "}
+                      <span className="font-mono">{o.id}</span>
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2">
-                      <div className="text-base font-semibold">
-                        {o.project_name}
-                      </div>
+                      <div className="text-base font-semibold">{o.project_name}</div>
+
                       {o.project_no ? (
                         <span className="text-xs rounded-full border px-2 py-0.5 border-gray-700 text-gray-200 md:border-gray-300 md:text-gray-700">
                           Prosjekt nr: {o.project_no}
                         </span>
                       ) : null}
+
                       <span className="text-xs rounded-full border px-2 py-0.5 border-gray-700 text-gray-200 md:border-gray-300 md:text-gray-700">
-                        {STATUS_LABEL[(o.status as any) in STATUS_LABEL ? (o.status as any) : "SUBMITTED"]}
+                        {statusLabelSafe(o.status)}
                       </span>
+
                       <span className="text-xs rounded-full border px-2 py-0.5 border-gray-700 text-gray-200 md:border-gray-300 md:text-gray-700">
                         {formatNok(o.total_nok ?? 0)}
                       </span>
                     </div>
 
                     <div className="text-sm text-gray-100 md:text-gray-700">
-                      Bestiller/kunde: <span className="font-medium">{o.contact_name}</span>
+                      Bestiller/kunde:{" "}
+                      <span className="font-medium">{o.contact_name}</span>
                       {o.contact_email ? (
-                        <span className="text-gray-300 md:text-gray-500"> · {o.contact_email}</span>
+                        <span className="text-gray-300 md:text-gray-500">
+                          {" "}
+                          · {o.contact_email}
+                        </span>
                       ) : null}
                     </div>
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2">
                     <select
-                      value={(o.status as any) || "SUBMITTED"}
-                      onChange={(e) => setOrderStatus(o.id, e.target.value)}
+                      value={isStatus(o.status) ? (o.status as Status) : "SUBMITTED"}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        if (isStatus(v)) void setOrderStatus(o.id, v);
+                      }}
                       className={cn(
                         "rounded-lg border px-3 py-2 text-sm outline-none",
                         "border-gray-700 bg-gray-950 text-gray-100 hover:border-gray-500",
@@ -707,9 +732,8 @@ export default function PurchasingIndexPage() {
           </div>
         )}
 
-        {/* Footnote */}
         <div className="text-xs text-gray-400 md:text-gray-500">
-          Hvis du fortsatt “ikke ser alle ordrer”: da er det 99% sannsynlig at Supabase RLS begrenser SELECT for admin/innkjøper.
+          Hvis du fortsatt “ikke ser alle ordrer”: da er det nesten alltid Supabase RLS som begrenser SELECT for admin/innkjøper.
           Da må vi oppdatere policies på <code>orders</code> (og <code>order_items</code>).
         </div>
       </div>
