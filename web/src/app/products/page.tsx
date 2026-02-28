@@ -158,6 +158,9 @@ export default function ProductsPage() {
   const [cartCount, setCartCount] = useState<number>(0);
   const [cartKey, setCartKey] = useState<string | null>(null);
 
+  // ✅ Logout state
+  const [signingOut, setSigningOut] = useState(false);
+
   const myEmail = me?.email ? String(me.email).toLowerCase() : "";
   const myName = me?.display_name ? String(me.display_name).trim() : "";
   const myRole: Role = (me?.role as Role) ?? "kunde";
@@ -176,6 +179,30 @@ export default function ProductsPage() {
     } else {
       // eslint-disable-next-line no-console
       console.log("[cart] no cart key detected in localStorage");
+    }
+  }
+
+  async function handleLogout() {
+    if (signingOut) return;
+    setSigningOut(true);
+
+    try {
+      await supabase.auth.signOut();
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn("signOut failed:", e);
+    } finally {
+      // Rydd litt lokalt for en ren opplevelse (ikke strengt nødvendig, men fint)
+      try {
+        window.localStorage.removeItem("sb-access-token");
+        window.localStorage.removeItem("sb-refresh-token");
+      } catch {
+        // ignore
+      }
+
+      setSigningOut(false);
+      router.replace("/login");
+      router.refresh();
     }
   }
 
@@ -308,7 +335,12 @@ export default function ProductsPage() {
   if (!me?.ok) {
     return (
       <div className={cn("min-h-screen p-6 space-y-3", "bg-gray-950 text-gray-100 md:bg-white md:text-gray-900")}>
-        <div className={cn("rounded-2xl border p-5 text-sm", "border-gray-800 bg-gray-900 md:border-gray-200 md:bg-white md:text-gray-700")}>
+        <div
+          className={cn(
+            "rounded-2xl border p-5 text-sm",
+            "border-gray-800 bg-gray-900 md:border-gray-200 md:bg-white md:text-gray-700"
+          )}
+        >
           Du har ikke tilgang. Logg inn på nytt.
         </div>
         <button
@@ -415,11 +447,28 @@ export default function ProductsPage() {
               ) : null}
             </div>
 
-            <div className="text-sm font-medium text-gray-100 md:text-gray-700">
-              Produkter ({filtered.length})
-              <span className="ml-2 text-xs text-gray-400 md:text-gray-500">
-                {display} · {myRole}
-              </span>
+            <div className="flex items-center gap-3">
+              <div className="text-sm font-medium text-gray-100 md:text-gray-700">
+                Produkter ({filtered.length})
+                <span className="ml-2 text-xs text-gray-400 md:text-gray-500">
+                  {display} · {myRole}
+                </span>
+              </div>
+
+              {/* ✅ Logg ut */}
+              <button
+                type="button"
+                className={cn(
+                  "rounded-xl border px-3 py-2 text-sm",
+                  "border-gray-700 bg-gray-900 text-gray-100 hover:bg-gray-800",
+                  "md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50",
+                  signingOut && "opacity-60 pointer-events-none"
+                )}
+                onClick={handleLogout}
+                title="Logg ut"
+              >
+                {signingOut ? "Logger ut…" : "Logg ut"}
+              </button>
             </div>
           </div>
         </div>
@@ -431,9 +480,7 @@ export default function ProductsPage() {
         <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <h1 className="text-2xl font-semibold text-white md:text-gray-900">Produktsøk</h1>
-            <p className="mt-1 text-sm text-gray-400 md:text-gray-600">
-              Søk på produkt-ID eller navn.
-            </p>
+            <p className="mt-1 text-sm text-gray-400 md:text-gray-600">Søk på produkt-ID eller navn.</p>
           </div>
 
           <div className="w-full sm:max-w-md">
