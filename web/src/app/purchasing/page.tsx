@@ -32,7 +32,7 @@ type OrderRow = {
   purchaser_note: string | null;
 
   updated_at?: string | null;
-  updated_by_name?: string | null; // display_name
+  updated_by_name?: string | null;
 };
 
 type OrderAuditRow = {
@@ -205,8 +205,6 @@ async function loadOrders(supabase: ReturnType<typeof supabaseBrowser>) {
 export default function PurchasingPage() {
   const router = useRouter();
 
-  // NB: Supabase without generated DB types -> mutations become `never`.
-  // We keep the client normal, but cast the mutation builders to `any` locally.
   const supabase = useMemo(() => supabaseBrowser(), []);
   const supabaseAny = supabase as any;
 
@@ -250,7 +248,6 @@ export default function PurchasingPage() {
       const { data: sess } = await supabase.auth.getSession();
       token = sess.session?.access_token ?? null;
 
-      // fallback refresh
       if (!token) {
         const { data: refreshed } = await supabase.auth.refreshSession();
         token = refreshed.session?.access_token ?? null;
@@ -361,26 +358,19 @@ export default function PurchasingPage() {
     return list;
   }, [rows, q, statusFilter, queueMode]);
 
-  async function updateOrder(
-    id: string,
-    patch: Partial<OrderRow>,
-    before?: OrderRow
-  ) {
+  async function updateOrder(id: string, patch: Partial<OrderRow>, before?: OrderRow) {
     setErr(null);
 
     const nowIso = new Date().toISOString();
 
-    // build payloads (do not include undefined keys)
     const basePayload: Record<string, any> = {};
-    if ("status" in patch) basePayload.status = patch.status ?? null;
+    if ("status" in patch) basePayload.status = patch.status ?? undefined;
     if ("expected_delivery_date" in patch)
-      basePayload.expected_delivery_date = patch.expected_delivery_date ?? null;
-    if ("delivery_info" in patch)
-      basePayload.delivery_info = patch.delivery_info ?? null;
+      basePayload.expected_delivery_date = patch.expected_delivery_date ?? undefined;
+    if ("delivery_info" in patch) basePayload.delivery_info = patch.delivery_info ?? undefined;
     if ("confirmation_file_path" in patch)
-      basePayload.confirmation_file_path = patch.confirmation_file_path ?? null;
-    if ("purchaser_note" in patch)
-      basePayload.purchaser_note = patch.purchaser_note ?? null;
+      basePayload.confirmation_file_path = patch.confirmation_file_path ?? undefined;
+    if ("purchaser_note" in patch) basePayload.purchaser_note = patch.purchaser_note ?? undefined;
 
     const payloadWithUpdated: Record<string, any> = {
       ...basePayload,
@@ -388,10 +378,7 @@ export default function PurchasingPage() {
       updated_by_name: myName || null,
     };
 
-    let upd = await supabaseAny
-      .from("orders")
-      .update(payloadWithUpdated)
-      .eq("id", id);
+    let upd = await supabaseAny.from("orders").update(payloadWithUpdated).eq("id", id);
 
     if (
       upd.error &&
@@ -435,7 +422,6 @@ export default function PurchasingPage() {
           diff,
         });
 
-        // fallback if actor_name column doesn't exist
         if (ins.error && looksLikeMissingColumn(ins.error, "actor_name")) {
           await supabaseAny.from("order_audit").insert({
             order_id: id,
@@ -546,9 +532,9 @@ export default function PurchasingPage() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <button
           className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50"
-          onClick={() => router.push("/products")}
+          onClick={() => router.push("/orders")}
         >
-          ← Til produkter
+          ← Mine ordre
         </button>
 
         <div className="text-xs text-gray-500">
@@ -862,17 +848,16 @@ function OrderCard({
           setBusy(true);
           try {
             const before: OrderRow = { ...o };
-            await onSave(
-              o.id,
-              {
-                status,
-                expected_delivery_date: eta || null,
-                delivery_info: info || null,
-                confirmation_file_path: confirmPath || null,
-                purchaser_note: note || null,
-              },
-              before
-            );
+
+            const patch: Partial<OrderRow> = {
+              status: status || "SUBMITTED",
+              expected_delivery_date: eta || null,
+              delivery_info: info || null,
+              confirmation_file_path: confirmPath || null,
+              purchaser_note: note || null,
+            };
+
+            await onSave(o.id, patch, before);
           } finally {
             setBusy(false);
           }
