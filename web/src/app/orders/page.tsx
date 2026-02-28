@@ -102,11 +102,39 @@ function statusTone(status: string): "green" | "yellow" | "red" | "neutral" {
   return "neutral";
 }
 
+// Mobil: mørk base. Desktop: lys base.
 function badgeClass(tone: ReturnType<typeof statusTone>) {
-  if (tone === "green") return "border-green-200 bg-green-50 text-green-800";
-  if (tone === "yellow") return "border-amber-200 bg-amber-50 text-amber-800";
-  if (tone === "red") return "border-red-200 bg-red-50 text-red-800";
-  return "border-gray-200 bg-gray-50 text-gray-700";
+  // base (mobile dark)
+  const base = "border px-3 py-1 text-xs rounded-full";
+  const md = "md:text-sm md:border";
+
+  if (tone === "green")
+    return cn(
+      base,
+      md,
+      "border-emerald-700/40 bg-emerald-950/40 text-emerald-200",
+      "md:border-emerald-200 md:bg-emerald-50 md:text-emerald-800"
+    );
+  if (tone === "yellow")
+    return cn(
+      base,
+      md,
+      "border-amber-700/40 bg-amber-950/40 text-amber-200",
+      "md:border-amber-200 md:bg-amber-50 md:text-amber-800"
+    );
+  if (tone === "red")
+    return cn(
+      base,
+      md,
+      "border-red-700/40 bg-red-950/40 text-red-200",
+      "md:border-red-200 md:bg-red-50 md:text-red-800"
+    );
+  return cn(
+    base,
+    md,
+    "border-gray-700 bg-gray-900 text-gray-200",
+    "md:border-gray-200 md:bg-gray-50 md:text-gray-700"
+  );
 }
 
 function looksLikeMissingColumn(err: any, col: string) {
@@ -130,9 +158,8 @@ export default function OrdersPage() {
   const [err, setErr] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
-  const myEmail = me?.email ? String(me.email).toLowerCase() : "";
   const myRole: Role = (me?.role as Role) ?? "kunde";
-  const myName = (me?.display_name ? String(me.display_name).trim() : "") || myEmail;
+  const myDisplayName = (me?.display_name ? String(me.display_name).trim() : "") || "—";
 
   const isAdmin = myRole === "admin";
 
@@ -171,25 +198,13 @@ export default function OrdersPage() {
       const selectBase =
         "id, created_at, status, project_name, project_no, expected_delivery_date, delivery_info, confirmation_file_path";
 
-      // ✅ Kall 1
-      const r1 = await supabase
-        .from("orders")
-        .select(selectWithUpdated)
-        .order("created_at", { ascending: false });
+      const r1 = await supabase.from("orders").select(selectWithUpdated).order("created_at", { ascending: false });
 
       let data: unknown[] | null = (r1.data as unknown[]) ?? null;
       let error: any = r1.error;
 
-      // ✅ fallback hvis kolonner ikke finnes
-      if (
-        error &&
-        (looksLikeMissingColumn(error, "updated_at") || looksLikeMissingColumn(error, "updated_by_name"))
-      ) {
-        const r2 = await supabase
-          .from("orders")
-          .select(selectBase)
-          .order("created_at", { ascending: false });
-
+      if (error && (looksLikeMissingColumn(error, "updated_at") || looksLikeMissingColumn(error, "updated_by_name"))) {
+        const r2 = await supabase.from("orders").select(selectBase).order("created_at", { ascending: false });
         data = (r2.data as unknown[]) ?? null;
         error = r2.error;
       }
@@ -287,18 +302,23 @@ export default function OrdersPage() {
 
   if (meLoading || loading) {
     return (
-      <div className="p-6">
+      <div className="min-h-screen bg-gray-950 text-gray-100 md:bg-white md:text-gray-900 p-6">
         <h1 className="text-xl font-semibold">Mine bestillinger</h1>
-        <p className="mt-2 text-sm text-gray-600">Laster…</p>
+        <p className="mt-2 text-sm text-gray-400 md:text-gray-600">Laster…</p>
       </div>
     );
   }
 
   if (!me?.ok) {
     return (
-      <div className="p-6 space-y-3">
-        <div className="rounded-2xl border p-5 text-sm text-gray-700">Du har ikke tilgang.</div>
-        <button className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50" onClick={() => router.push("/login")}>
+      <div className="min-h-screen bg-gray-950 text-gray-100 md:bg-white md:text-gray-900 p-6 space-y-3">
+        <div className="rounded-2xl border border-gray-800 bg-gray-900/40 p-5 text-sm text-gray-200 md:border-gray-200 md:bg-white md:text-gray-700">
+          Du har ikke tilgang.
+        </div>
+        <button
+          className="rounded-xl border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-gray-100 hover:bg-gray-800 md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50"
+          onClick={() => router.push("/login")}
+        >
           Til innlogging
         </button>
       </div>
@@ -306,133 +326,187 @@ export default function OrdersPage() {
   }
 
   return (
-    <div className="p-6 space-y-5">
-      <header className="flex flex-wrap items-center justify-between gap-3">
-        <button className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50" onClick={() => router.push("/products")}>
-          ← Produkter
-        </button>
+    <div className="min-h-screen bg-gray-950 text-gray-100 md:bg-white md:text-gray-900">
+      {/* Topbar */}
+      <div className="sticky top-0 z-10 border-b border-gray-800 bg-gray-950/95 backdrop-blur md:border-gray-200 md:bg-white/80">
+        <div className="mx-auto max-w-5xl px-4 md:px-6 py-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <button
+              className="rounded-xl border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-gray-100 hover:bg-gray-800 md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50"
+              onClick={() => router.push("/products")}
+            >
+              ← Produkter
+            </button>
 
-        {myName ? (
-          <div className="text-xs text-gray-500">
-            {myName} · {myRole}
+            <div className="text-xs text-gray-300 md:text-gray-600">
+              {myDisplayName} · {myRole}
+            </div>
           </div>
-        ) : null}
-      </header>
-
-      <div className="space-y-1">
-        <h1 className="text-xl font-semibold">Mine bestillinger</h1>
-        <p className="text-sm text-gray-600">Status, ETA og ordrebekreftelse – sortert etter sist oppdatert.</p>
+        </div>
       </div>
 
-      {err ? <div className="rounded-xl border bg-white px-4 py-3 text-sm text-red-700">{err}</div> : null}
-      {toast ? <div className="rounded-xl border bg-white px-4 py-3 text-sm text-green-700">{toast}</div> : null}
+      {/* Content */}
+      <div className="mx-auto max-w-5xl px-4 md:px-6 py-5 space-y-4">
+        <div className="space-y-1">
+          <h1 className="text-xl font-semibold">Mine bestillinger</h1>
+          <p className="text-sm text-gray-400 md:text-gray-600">
+            Status, ETA og ordrebekreftelse – sortert etter sist oppdatert.
+          </p>
+        </div>
 
-      {sorted.length === 0 ? (
-        <div className="rounded-2xl border p-6 text-sm text-gray-600">Du har ingen bestillinger ennå.</div>
-      ) : (
-        <div className="space-y-3">
-          {sorted.map((o) => {
-            const hasConfirmation = Boolean(o.confirmation_file_path);
-            const busyDownload = downloadingId === o.id;
-            const busyDelete = deletingId === o.id;
+        {err ? (
+          <div className="rounded-xl border border-red-700/40 bg-red-950/40 px-4 py-3 text-sm text-red-200 md:border-red-200 md:bg-white md:text-red-700">
+            {err}
+          </div>
+        ) : null}
 
-            const lastTs = o.updated_at ?? o.created_at;
-            const etaOverdue = isEtaOverdue(o.expected_delivery_date);
-            const etaSoon = isEtaSoon(o.expected_delivery_date, 7);
+        {toast ? (
+          <div className="rounded-xl border border-emerald-700/40 bg-emerald-950/40 px-4 py-3 text-sm text-emerald-200 md:border-emerald-200 md:bg-white md:text-emerald-700">
+            {toast}
+          </div>
+        ) : null}
 
-            const tone = statusTone(o.status);
+        {sorted.length === 0 ? (
+          <div className="rounded-2xl border border-gray-800 bg-gray-900/40 p-6 text-sm text-gray-200 md:border-gray-200 md:bg-white md:text-gray-700">
+            Du har ingen bestillinger ennå.
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {sorted.map((o) => {
+              const hasConfirmation = Boolean(o.confirmation_file_path);
+              const busyDownload = downloadingId === o.id;
+              const busyDelete = deletingId === o.id;
 
-            return (
-              <div key={o.id} className="rounded-2xl border bg-white p-5 shadow-sm">
-                <div className="flex flex-wrap items-start justify-between gap-4">
-                  <div className="space-y-1">
-                    <div className="text-sm text-gray-600">Opprettet: {formatDateTime(o.created_at)}</div>
+              const lastTs = o.updated_at ?? o.created_at;
+              const etaOverdue = isEtaOverdue(o.expected_delivery_date);
+              const etaSoon = isEtaSoon(o.expected_delivery_date, 7);
 
-                    <div className="text-sm text-gray-600">
-                      Sist endret: <span className="font-medium text-gray-900">{formatDateTime(lastTs)}</span>
-                      {o.updated_by_name ? <span className="text-gray-500"> · {o.updated_by_name}</span> : null}
-                    </div>
+              const tone = statusTone(o.status);
 
-                    <div className="font-semibold">{o.project_name}</div>
-
-                    {o.project_no ? <div className="text-sm text-gray-600">Prosjekt nr: {o.project_no}</div> : null}
-                  </div>
-
-                  <div className="flex flex-col items-end gap-2">
-                    <div className={cn("rounded-full border px-3 py-1 text-sm", badgeClass(tone))}>
-                      <span className="font-medium">{statusLabel(o.status)}</span>
-                    </div>
-
-                    <div className="text-sm text-gray-700 text-right">
-                      <div>
-                        ETA:{" "}
-                        {o.expected_delivery_date ? (
-                          <span
-                            className={cn(
-                              "font-medium",
-                              etaOverdue ? "text-red-700" : etaSoon ? "text-amber-700" : "text-gray-900"
-                            )}
-                          >
-                            {formatDateOnly(o.expected_delivery_date)}
-                          </span>
-                        ) : (
-                          <span className="text-gray-500">Ikke satt</span>
-                        )}
+              return (
+                <div
+                  key={o.id}
+                  className={cn(
+                    "rounded-2xl border p-4 md:p-5",
+                    "border-gray-800 bg-gray-900/40 md:border-gray-200 md:bg-white"
+                  )}
+                >
+                  <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between md:gap-4">
+                    <div className="space-y-1">
+                      <div className="text-xs text-gray-300 md:text-gray-500">
+                        Opprettet: {formatDateTime(o.created_at)}
                       </div>
 
-                      {o.expected_delivery_date ? (
-                        <div
-                          className={cn(
-                            "text-xs mt-0.5",
-                            etaOverdue ? "text-red-600" : etaSoon ? "text-amber-600" : "text-gray-500"
-                          )}
-                        >
-                          {etaCounterText(o.expected_delivery_date)}
+                      <div className="text-xs text-gray-300 md:text-gray-500">
+                        Sist endret:{" "}
+                        <span className="font-medium text-gray-100 md:text-gray-900">
+                          {formatDateTime(lastTs)}
+                        </span>
+                        {o.updated_by_name ? (
+                          <span className="text-gray-400 md:text-gray-500"> · {o.updated_by_name}</span>
+                        ) : null}
+                      </div>
+
+                      <div className="text-base font-semibold text-gray-100 md:text-gray-900">
+                        {o.project_name}
+                      </div>
+
+                      {o.project_no ? (
+                        <div className="text-sm text-gray-300 md:text-gray-600">
+                          Prosjekt nr: {o.project_no}
                         </div>
                       ) : null}
                     </div>
+
+                    <div className="flex items-start justify-between gap-3 md:flex-col md:items-end md:gap-2">
+                      <div className={badgeClass(tone)}>
+                        <span className="font-medium">{statusLabel(o.status)}</span>
+                      </div>
+
+                      <div className="text-right text-sm">
+                        <div className="text-gray-200 md:text-gray-700">
+                          ETA:{" "}
+                          {o.expected_delivery_date ? (
+                            <span
+                              className={cn(
+                                "font-medium",
+                                etaOverdue
+                                  ? "text-red-300 md:text-red-700"
+                                  : etaSoon
+                                    ? "text-amber-300 md:text-amber-700"
+                                    : "text-gray-100 md:text-gray-900"
+                              )}
+                            >
+                              {formatDateOnly(o.expected_delivery_date)}
+                            </span>
+                          ) : (
+                            <span className="text-gray-400 md:text-gray-500">Ikke satt</span>
+                          )}
+                        </div>
+
+                        {o.expected_delivery_date ? (
+                          <div
+                            className={cn(
+                              "text-xs mt-0.5",
+                              etaOverdue
+                                ? "text-red-300/90 md:text-red-600"
+                                : etaSoon
+                                  ? "text-amber-300/90 md:text-amber-600"
+                                  : "text-gray-400 md:text-gray-500"
+                            )}
+                          >
+                            {etaCounterText(o.expected_delivery_date)}
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
                   </div>
-                </div>
 
-                {o.delivery_info ? (
-                  <div className="mt-3 rounded-xl border bg-gray-50 p-3 text-sm text-gray-700 whitespace-pre-line">
-                    {o.delivery_info}
-                  </div>
-                ) : null}
-
-                <div className="mt-4 flex flex-wrap items-center gap-2">
-                  <button className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50" onClick={() => router.push(`/orders/${o.id}`)}>
-                    Åpne ordre
-                  </button>
-
-                  {hasConfirmation ? (
-                    <button
-                      disabled={busyDownload}
-                      className="rounded-lg bg-black px-3 py-2 text-sm text-white disabled:opacity-50"
-                      onClick={() => openConfirmation(o.id)}
-                    >
-                      {busyDownload ? "Henter lenke…" : "Last ned ordrebekreftelse"}
-                    </button>
-                  ) : (
-                    <div className="text-sm text-gray-500">Ordrebekreftelse ikke tilgjengelig enda</div>
-                  )}
-
-                  {isAdmin ? (
-                    <button
-                      disabled={busyDelete}
-                      className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50 disabled:opacity-50"
-                      onClick={() => deleteOrder(o.id)}
-                      title="Slett ordre"
-                    >
-                      {busyDelete ? "Sletter…" : "Slett"}
-                    </button>
+                  {o.delivery_info ? (
+                    <div className="mt-3 rounded-xl border border-gray-800 bg-gray-950/40 p-3 text-sm text-gray-200 whitespace-pre-line md:border-gray-200 md:bg-gray-50 md:text-gray-700">
+                      {o.delivery_info}
+                    </div>
                   ) : null}
+
+                  <div className="mt-4 flex flex-wrap items-center gap-2">
+                    <button
+                      className="rounded-xl border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-gray-100 hover:bg-gray-800 md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50"
+                      onClick={() => router.push(`/orders/${o.id}`)}
+                    >
+                      Åpne ordre
+                    </button>
+
+                    {hasConfirmation ? (
+                      <button
+                        disabled={busyDownload}
+                        className="rounded-xl bg-white/10 px-3 py-2 text-sm text-gray-100 hover:bg-white/15 disabled:opacity-50 md:bg-black md:text-white md:hover:opacity-90"
+                        onClick={() => openConfirmation(o.id)}
+                      >
+                        {busyDownload ? "Henter lenke…" : "Last ned ordrebekreftelse"}
+                      </button>
+                    ) : (
+                      <div className="text-sm text-gray-400 md:text-gray-500">
+                        Ordrebekreftelse ikke tilgjengelig enda
+                      </div>
+                    )}
+
+                    {isAdmin ? (
+                      <button
+                        disabled={busyDelete}
+                        className="rounded-xl border border-red-700/50 bg-red-950/30 px-3 py-2 text-sm text-red-200 hover:bg-red-950/45 disabled:opacity-50 md:border-red-200 md:bg-white md:text-red-700 md:hover:bg-red-50"
+                        onClick={() => deleteOrder(o.id)}
+                        title="Slett ordre"
+                      >
+                        {busyDelete ? "Sletter…" : "Slett"}
+                      </button>
+                    ) : null}
+                  </div>
                 </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
+              );
+            })}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
