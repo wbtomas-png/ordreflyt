@@ -1,457 +1,490 @@
-// file: web/src/app/admin/products/import/page.tsx
+// file: web/src/app/admin/products/page.tsx
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import * as XLSX from "xlsx";
-import { useRequireMe } from "@/lib/useRequireMe";
 import { supabaseBrowser } from "@/lib/supabase/browser";
+import { useRequireMe } from "@/lib/useRequireMe";
 
-type ImportRow = {
+type ProductRow = {
+  id: string;
   product_no: string;
-  name?: string | null;
-  list_price?: number | null;
-  is_active?: boolean | null;
-
-  // bulk assets
-  thumb_path?: string | null; // products.thumb_path
-  documents?: string | null; // "path1, path2, ..."
-  gallery_images?: string | null; // "path1, path2, ..."
-
-  accessories?: string | null; // CSV product_no
-  spare_parts?: string | null; // CSV product_no
+  name: string | null;
+  list_price: number | null;
+  thumb_path: string | null;
+  is_active: boolean | null;
+  created_at?: string | null;
 };
 
-type ImportResponse =
-  | {
-      ok: true;
-      products_upserted: number;
-      thumbs_upserted?: number;
-      files_upserted?: number;
-      images_upserted?: number;
-      relations_upserted: number;
-      rows_in?: number;
-      rows_deduped?: number;
-    }
-  | { ok: false; error: string; details?: any };
+function formatNok(value?: number | null) {
+  if (value === null || value === undefined) return "";
+  const v = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(v)) return "";
+  return new Intl.NumberFormat("nb-NO", {
+    style: "currency",
+    currency: "NOK",
+    maximumFractionDigits: 0,
+  }).format(v);
+}
 
 function cn(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(" ");
 }
 
-function toBool(v: any): boolean | null {
-  if (v === null || v === undefined || v === "") return null;
-  if (typeof v === "boolean") return v;
-
-  const s = String(v).trim().toLowerCase();
-  if (["1", "true", "ja", "yes", "y"].includes(s)) return true;
-  if (["0", "false", "nei", "no", "n"].includes(s)) return false;
-
-  return null;
+function safeProductNoCandidate(input: string) {
+  return input.trim();
 }
 
-function toNumber(v: any): number | null {
-  if (v === null || v === undefined || v === "") return null;
-  if (typeof v === "number") return Number.isFinite(v) ? v : null;
-
-  const s = String(v).replace(",", ".").trim();
-  const n = Number(s);
-  return Number.isFinite(n) ? n : null;
-}
-
-function normalizePathCell(v: any): string | null {
-  const s = String(v ?? "").trim();
-  return s ? s : null;
-}
-
-function normalizeListCell(v: any): string | null {
-  const s = String(v ?? "").trim();
+function safeParseJson<T>(s: string | null): T | null {
   if (!s) return null;
-
-  const parts = s
-    .split(/[;,\n\r]+/g)
-    .map((x) => x.trim())
-    .filter(Boolean);
-
-  return parts.length ? parts.join(",") : null;
-}
-
-function normalizeMultiPathCell(v: any): string | null {
-  const s = String(v ?? "").trim();
-  if (!s) return null;
-
-  const parts = s
-    .split(/[;,\n\r]+/g)
-    .map((x) => x.trim())
-    .filter(Boolean);
-
-  return parts.length ? parts.join(",") : null;
-}
-
-/** Dedupe: siste forekomst av product_no i Excel vinner */
-function dedupeByProductNo(parsed: ImportRow[]) {
-  const map = new Map<string, ImportRow>();
-  const counts = new Map<string, number>();
-
-  for (const r of parsed) {
-    const pn = String(r.product_no ?? "").trim();
-    if (!pn) continue; // viktig: ikke lag "" key
-
-    const key = pn.toUpperCase();
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-    map.set(key, { ...r, product_no: pn });
+  try {
+    return JSON.parse(s) as T;
+  } catch {
+    return null;
   }
-
-  const deduped = Array.from(map.values());
-  const dupKeys = Array.from(counts.entries())
-    .filter(([, c]) => c > 1)
-    .map(([k]) => k);
-
-  return { deduped, dupKeys };
 }
 
-function validate(parsed: ImportRow[]) {
-  const errors: string[] = [];
-  const warnings: string[] = [];
-
-  parsed.forEach((r, i) => {
-    const rowNo = i + 2; // header=1
-    const pn = (r.product_no ?? "").trim();
-    if (!pn) errors.push(`Rad ${rowNo}: product_no mangler.`);
-
-    if (r.list_price !== null && r.list_price !== undefined) {
-      const n = Number(r.list_price);
-      if (!Number.isFinite(n)) errors.push(`Rad ${rowNo}: list_price er ugyldig.`);
-    }
-
-    const acc = (r.accessories ?? "").trim();
-    if (acc && !acc.replace(/[;,]/g, "").trim()) {
-      errors.push(`Rad ${rowNo}: accessories ser ut til å være tom liste (kun separatorer).`);
-    }
-
-    const sp = (r.spare_parts ?? "").trim();
-    if (sp && !sp.replace(/[;,]/g, "").trim()) {
-      errors.push(`Rad ${rowNo}: spare_parts ser ut til å være tom liste (kun separatorer).`);
-    }
-
-    const tp = (r.thumb_path ?? "").trim();
-    if (tp && (tp.startsWith("http://") || tp.startsWith("https://"))) {
-      errors.push(
-        `Rad ${rowNo}: thumb_path ser ut til å være URL. Bruk storage path (f.eks. products/...).`
-      );
-    }
-
-    const docs = (r.documents ?? "").trim();
-    if (docs && !docs.replace(/[;,\n\r]/g, "").trim()) {
-      errors.push(`Rad ${rowNo}: documents ser ut til å være tom liste (kun separatorer).`);
-    }
-
-    const gal = (r.gallery_images ?? "").trim();
-    if (gal && !gal.replace(/[;,\n\r]/g, "").trim()) {
-      errors.push(`Rad ${rowNo}: gallery_images ser ut til å være tom liste (kun separatorer).`);
-    }
-  });
-
-  const anyThumb = parsed.some((r) => (r.thumb_path ?? "").trim().length > 0);
-  const anyDocs = parsed.some((r) => (r.documents ?? "").trim().length > 0);
-  const anyGallery = parsed.some((r) => (r.gallery_images ?? "").trim().length > 0);
-
-  // ✅ advarsel, ikke feil
-  if (!anyThumb && !anyDocs && !anyGallery && parsed.length > 0) {
-    warnings.push(
-      "Merk: Ingen rader inneholder thumb_path/documents/gallery_images. " +
-        "Hvis dette er forventet, ignorer. Hvis ikke: sjekk kolonnenavnene."
-    );
-  }
-
-  return { errors, warnings };
+function normalizeStoragePath(p: string) {
+  let s = p.trim();
+  if (s.startsWith("/")) s = s.slice(1);
+  if (s.startsWith("product-images/")) s = s.slice("product-images/".length);
+  return s;
 }
 
-export default function AdminProductsImportPage() {
+export default function AdminProductsPage() {
   const router = useRouter();
-  const supabase = useMemo(() => supabaseBrowser(), []);
-
-  // ✅ invite-only + admin gate
+  const supabase = useMemo(() => supabaseBrowser() as any, []);
   const { me, loading: meLoading } = useRequireMe({ requireRole: "admin" });
 
-  const [rows, setRows] = useState<ImportRow[]>([]);
-  const [errors, setErrors] = useState<string[]>([]);
-  const [warnings, setWarnings] = useState<string[]>([]);
-  const [importing, setImporting] = useState(false);
-  const [result, setResult] = useState<string | null>(null);
-  const [fileName, setFileName] = useState<string>("");
+  const [loading, setLoading] = useState(true);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  async function onFile(file: File) {
-    setResult(null);
-    setErrors([]);
-    setWarnings([]);
-    setRows([]);
-    setFileName(file.name);
+  const [items, setItems] = useState<ProductRow[]>([]);
+  const [q, setQ] = useState("");
 
-    const buf = await file.arrayBuffer();
-    const wb = XLSX.read(buf, { type: "array" });
-    const ws = wb.Sheets[wb.SheetNames[0]];
-    const json = XLSX.utils.sheet_to_json<Record<string, any>>(ws, { defval: "" });
+  // Signed thumbs
+  const [thumbUrlByPath, setThumbUrlByPath] = useState<Record<string, string>>({});
 
-    const parsedRaw: ImportRow[] = json.map((r) => ({
-      product_no: String(r.product_no ?? "").trim(),
-      name: String(r.name ?? "").trim() || null,
-      list_price: toNumber(r.list_price),
-      is_active: toBool(r.is_active) ?? true,
+  // New product UI
+  const [creating, setCreating] = useState(false);
+  const [newProductNo, setNewProductNo] = useState("");
+  const [newName, setNewName] = useState("");
+  const [newPrice, setNewPrice] = useState<string>("");
+  const [newActive, setNewActive] = useState(true);
 
-      thumb_path: normalizePathCell(r.thumb_path),
-      documents: normalizeMultiPathCell(r.documents),
-      gallery_images: normalizeMultiPathCell(r.gallery_images),
-
-      accessories: normalizeListCell(r.accessories),
-      spare_parts: normalizeListCell(r.spare_parts),
-    }));
-
-    const { deduped, dupKeys } = dedupeByProductNo(parsedRaw);
-    const { errors: errs, warnings: warns } = validate(deduped);
-
-    const nextWarnings = [...warns];
-    if (dupKeys.length > 0) {
-      nextWarnings.push(
-        `Merk: Excel-filen inneholder duplikate product_no (${dupKeys.length} stk). ` +
-          `Siste forekomst ble brukt (overskriver tidligere i filen).`
-      );
-    }
-
-    setRows(deduped);
-    setErrors(errs);
-    setWarnings(nextWarnings);
+  // Small toast
+  const [toast, setToast] = useState<string | null>(null);
+  function showToast(msg: string) {
+    setToast(msg);
+    window.setTimeout(() => setToast(null), 1200);
   }
 
-  async function runImport() {
-    if (rows.length === 0) return;
+  async function loadProducts(searchTerm?: string) {
+    setErrorMsg(null);
 
-    if (errors.length > 0) {
-      alert("Rett feilene før import.");
+    let query: any = (supabase as any)
+      .from("products")
+      .select("id, product_no, name, list_price, thumb_path, is_active, created_at")
+      .order("created_at", { ascending: false });
+
+    const term = (searchTerm ?? q).trim();
+    if (term) query = query.or(`product_no.ilike.%${term}%,name.ilike.%${term}%`);
+
+    const { data, error } = await query;
+    if (error) {
+      console.error(error);
+      setItems([]);
+      setErrorMsg(error.message ?? "Kunne ikke hente produkter.");
       return;
     }
 
-    setImporting(true);
-    setResult(null);
+    const list = ((data ?? []) as unknown) as ProductRow[];
+    setItems(list);
 
+    // Fetch thumbnails (signed urls) for top N unique thumb_path
+    const paths = Array.from(new Set(list.map((p) => p.thumb_path).filter(Boolean) as string[]));
+    const toFetch = paths.slice(0, 60);
+
+    if (toFetch.length > 0) {
+      const entries: Array<[string, string]> = [];
+      for (const rawPath of toFetch) {
+        try {
+          const path = normalizeStoragePath(rawPath);
+          const { data: signed, error: sErr } = await supabase.storage
+            .from("product-images")
+            .createSignedUrl(path, 600);
+          if (sErr) throw sErr;
+          if (signed?.signedUrl) entries.push([rawPath, signed.signedUrl]);
+        } catch (e) {
+          // fallback: ignore
+          console.warn("thumb signed-url failed for path:", rawPath, e);
+        }
+      }
+
+      if (entries.length > 0) {
+        setThumbUrlByPath((prev) => {
+          const next = { ...prev };
+          for (const [p, u] of entries) next[p] = u;
+          return next;
+        });
+      }
+    }
+  }
+
+  useEffect(() => {
+    let alive = true;
+
+    (async () => {
+      if (meLoading) return;
+
+      if (!me?.ok || me.role !== "admin") {
+        if (alive) setLoading(false);
+        return;
+      }
+
+      if (!alive) return;
+      setLoading(true);
+      setErrorMsg(null);
+
+      await loadProducts("");
+
+      if (!alive) return;
+      setLoading(false);
+    })();
+
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [meLoading, me?.ok, me?.role]);
+
+  useEffect(() => {
+    if (meLoading) return;
+    if (!me?.ok || me.role !== "admin") return;
+
+    const t = window.setTimeout(() => {
+      void loadProducts(q);
+    }, 200);
+
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [q, meLoading, me?.ok, me?.role]);
+
+  async function createNewProduct() {
+    setErrorMsg(null);
+
+    const pn = safeProductNoCandidate(newProductNo);
+    if (!pn) {
+      setErrorMsg("Produktnr (product_no) må være satt.");
+      return;
+    }
+
+    const price = newPrice.trim() === "" ? null : Number(newPrice.replace(",", "."));
+    if (price !== null && !Number.isFinite(price)) {
+      setErrorMsg("Ugyldig pris.");
+      return;
+    }
+
+    setCreating(true);
     try {
-      // ✅ Hent token ferskt (ikke stol på me.token)
-      const { data: sessRes, error: sessErr } = await supabase.auth.getSession();
-      if (sessErr) console.error(sessErr);
+      const { data, error } = await (supabase as any)
+        .from("products")
+        .insert({
+          product_no: pn,
+          name: newName.trim() === "" ? null : newName.trim(),
+          list_price: price,
+          is_active: newActive,
+        } as any)
+        .select("id")
+        .single();
 
-      let token = sessRes.session?.access_token ?? null;
-
-      // Prøv refresh én gang hvis token mangler
-      if (!token) {
-        const { data: refreshed, error: refreshErr } = await supabase.auth.refreshSession();
-        if (refreshErr) console.error(refreshErr);
-        token = refreshed.session?.access_token ?? null;
+      if (error) {
+        console.error("create product error:", error);
+        setErrorMsg(error.message ?? "Kunne ikke opprette produkt.");
+        return;
       }
 
-      if (!token) throw new Error("Mangler token (logg inn på nytt).");
-
-      const res = await fetch("/api/products/import", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ rows }),
-      });
-
-      const ct = res.headers.get("content-type") || "";
-      const raw = await res.text();
-
-      if (!ct.includes("application/json")) {
-        throw new Error(
-          `Import-endepunktet svarte ikke JSON (status ${res.status}). (Fikk: ${ct || "ukjent"})`
+      if (!data?.id) {
+        setErrorMsg(
+          "Produkt ble kanskje opprettet, men vi fikk ikke id tilbake. Sjekk at insert-kallet bruker .select('id').single()."
         );
+        return;
       }
 
-      const data = JSON.parse(raw) as ImportResponse;
+      setNewProductNo("");
+      setNewName("");
+      setNewPrice("");
+      setNewActive(true);
 
-      if (!res.ok || !("ok" in data) || data.ok === false) {
-        const base = (data as any)?.error ?? `Import feilet (status ${res.status}).`;
-        const details = (data as any)?.details;
-        const extra =
-          details && typeof details === "object"
-            ? `\n\nDetails:\n${JSON.stringify(details, null, 2)}`
-            : "";
-        throw new Error(base + extra);
-      }
-
-      setResult(
-        `Import OK: ${data.products_upserted} produkter, ` +
-          `${data.thumbs_upserted ?? 0} thumbs, ` +
-          `${data.files_upserted ?? 0} docs, ` +
-          `${data.images_upserted ?? 0} galleri-bilder, ` +
-          `${data.relations_upserted} relasjoner.` +
-          (data.rows_in !== undefined && data.rows_deduped !== undefined
-            ? ` (rows: ${data.rows_in} → ${data.rows_deduped})`
-            : "")
-      );
+      router.push(`/admin/products/${data.id}`);
     } catch (e: any) {
       console.error(e);
-      setResult(`Import feilet: ${e?.message ?? "Ukjent feil"}`);
+      setErrorMsg(e?.message ?? "Kunne ikke opprette produkt.");
     } finally {
-      setImporting(false);
+      setCreating(false);
     }
   }
 
   if (meLoading) {
     return (
-      <div className="p-6">
-        <div className="text-sm text-gray-600">Sjekker tilgang…</div>
+      <div className="min-h-screen bg-gray-950 text-gray-100 md:bg-white md:text-gray-900">
+        <div className="p-6 text-sm text-gray-400 md:text-gray-600">Laster…</div>
       </div>
     );
   }
 
   if (!me?.ok || me.role !== "admin") {
     return (
-      <div className="p-6 space-y-3">
-        <button
-          className="rounded-lg border px-3 py-2 hover:bg-gray-50"
-          onClick={() => router.push("/products")}
-        >
-          ← Til produkter
-        </button>
-        <div className="rounded-2xl border p-5 text-sm text-gray-700">Du har ikke admin-tilgang.</div>
+      <div className="min-h-screen bg-gray-950 text-gray-100 md:bg-white md:text-gray-900">
+        <div className="p-6 space-y-3">
+          <button
+            className="rounded-xl border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-gray-100 hover:bg-gray-800 md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50"
+            onClick={() => router.push("/products")}
+          >
+            ← Til produkter
+          </button>
+
+          <div className="rounded-2xl border border-gray-800 bg-gray-900 p-5 text-sm text-gray-200 md:border-gray-200 md:bg-white md:text-gray-700">
+            Du har ikke admin-tilgang.
+          </div>
+        </div>
       </div>
     );
   }
 
-  const disabled = importing || rows.length === 0 || errors.length > 0;
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gray-950 text-gray-100 md:bg-white md:text-gray-900">
+        <div className="p-6 text-sm text-gray-400 md:text-gray-600">Laster…</div>
+      </div>
+    );
+  }
 
   return (
-    <div className="p-6 space-y-6">
-      <header className="flex items-start justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-semibold">Bulk import produkter</h1>
-          <div className="mt-1 text-sm text-gray-600">
-            Last opp Excel (.xlsx). Første ark brukes.
-            <br />
-            Kolonner: <code>product_no</code>, <code>name</code>, <code>list_price</code>,{" "}
-            <code>is_active</code>, <code>thumb_path</code>, <code>documents</code>,{" "}
-            <code>gallery_images</code>, <code>accessories</code>, <code>spare_parts</code>.
+    <div className="min-h-screen bg-gray-950 text-gray-100 md:bg-white md:text-gray-900">
+      {/* Topbar */}
+      <div className="sticky top-0 z-10 border-b border-gray-800 bg-gray-950/95 backdrop-blur md:border-gray-200 md:bg-white/80">
+        <div className="mx-auto max-w-5xl px-4 py-3 sm:px-6">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <h1 className="text-base font-semibold md:text-xl">Admin produkter</h1>
+
+              <button
+                className="rounded-xl border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-gray-100 hover:bg-gray-800 md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50"
+                onClick={() => router.push("/products")}
+              >
+                Kundevisning
+              </button>
+
+              <button
+                className="rounded-xl border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-gray-100 hover:bg-gray-800 md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50"
+                onClick={() => router.push("/admin/products/import")}
+              >
+                Bulk import
+              </button>
+            </div>
+
+            <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
+              <input
+                className="w-full rounded-xl border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-gray-100 outline-none focus:border-gray-500 md:w-72 md:border-gray-300 md:bg-white md:text-gray-900 md:focus:border-gray-400"
+                placeholder="Søk produktnr eller navn…"
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+              />
+
+              <button
+                className="rounded-xl bg-white px-4 py-2 text-sm font-semibold text-gray-900 hover:opacity-90 md:bg-black md:text-white"
+                onClick={() => {
+                  document
+                    .getElementById("new-product-card")
+                    ?.scrollIntoView({ behavior: "smooth", block: "start" });
+                }}
+              >
+                + Nytt produkt
+              </button>
+            </div>
           </div>
         </div>
+      </div>
 
-        <button
-          className="rounded-lg border px-3 py-2 hover:bg-gray-50"
-          onClick={() => router.push("/admin/products")}
+      {/* Content */}
+      <div className="mx-auto max-w-5xl p-4 sm:p-6 space-y-6">
+        {errorMsg ? (
+          <div className="rounded-2xl border border-red-900/40 bg-red-950/40 p-4 text-sm text-red-200 md:border-red-200 md:bg-red-50 md:text-red-700">
+            {errorMsg}
+          </div>
+        ) : null}
+
+        {toast ? (
+          <div className="rounded-2xl border border-emerald-900/40 bg-emerald-950/40 p-4 text-sm text-emerald-200 md:border-emerald-200 md:bg-emerald-50 md:text-emerald-700">
+            {toast}
+          </div>
+        ) : null}
+
+        {/* New product */}
+        <section
+          id="new-product-card"
+          className="rounded-2xl border border-gray-800 bg-gray-900 p-5 space-y-4 md:border-gray-200 md:bg-white"
         >
-          ← Tilbake
-        </button>
-      </header>
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h2 className="font-semibold">Nytt produkt</h2>
+              <div className="text-sm text-gray-400 md:text-gray-600">
+                Krever <code className="font-mono">product_no</code> (NOT NULL).
+              </div>
+            </div>
 
-      <section className="rounded-2xl border p-5 space-y-4">
-        <div className="flex flex-wrap items-center gap-3">
-          <input
-            type="file"
-            accept=".xlsx,.xls,.csv"
-            className="block w-full max-w-md text-sm"
-            onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) onFile(f);
-            }}
-          />
-          {fileName ? <div className="text-sm text-gray-500">Valgt: {fileName}</div> : null}
-        </div>
-
-        {errors.length > 0 ? (
-          <div className="rounded-xl border p-4 text-sm text-red-600 space-y-1">
-            {errors.map((x, i) => (
-              <div key={i}>{x}</div>
-            ))}
+            <button
+              disabled={creating}
+              className="rounded-xl bg-white px-4 py-2 text-sm font-semibold text-gray-900 disabled:opacity-50 hover:opacity-90 md:bg-black md:text-white"
+              onClick={createNewProduct}
+            >
+              {creating ? "Oppretter…" : "Opprett"}
+            </button>
           </div>
-        ) : null}
 
-        {warnings.length > 0 ? (
-          <div className="rounded-xl border p-4 text-sm text-amber-700 space-y-1">
-            {warnings.map((x, i) => (
-              <div key={i}>{x}</div>
-            ))}
+          <div className="grid gap-3 md:grid-cols-2">
+            <label className="text-sm">
+              Produktnr (product_no) *
+              <input
+                className="mt-1 w-full rounded-xl border border-gray-700 bg-gray-950 px-3 py-2 text-gray-100 outline-none focus:border-gray-500 md:border-gray-300 md:bg-white md:text-gray-900 md:focus:border-gray-400"
+                value={newProductNo}
+                onChange={(e) => setNewProductNo(e.target.value)}
+                placeholder="P-001"
+              />
+            </label>
+
+            <label className="text-sm">
+              Pris (NOK)
+              <input
+                className="mt-1 w-full rounded-xl border border-gray-700 bg-gray-950 px-3 py-2 text-gray-100 outline-none focus:border-gray-500 md:border-gray-300 md:bg-white md:text-gray-900 md:focus:border-gray-400"
+                value={newPrice}
+                onChange={(e) => setNewPrice(e.target.value)}
+                placeholder="1990"
+                inputMode="numeric"
+              />
+              <div className="mt-1 text-xs text-gray-400 md:text-gray-600">
+                {newPrice ? `Visning: ${formatNok(Number(newPrice.replace(",", ".")))}` : ""}
+              </div>
+            </label>
           </div>
-        ) : null}
 
-        {result ? (
-          <div
-            className={cn(
-              "rounded-xl border p-4 text-sm whitespace-pre-wrap",
-              result.startsWith("Import OK") ? "text-green-700" : "text-gray-700"
-            )}
-          >
-            {result}
+          <label className="text-sm block">
+            Navn
+            <input
+              className="mt-1 w-full rounded-xl border border-gray-700 bg-gray-950 px-3 py-2 text-gray-100 outline-none focus:border-gray-500 md:border-gray-300 md:bg-white md:text-gray-900 md:focus:border-gray-400"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              placeholder="Produktnavn"
+            />
+          </label>
+
+          <label className="inline-flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={newActive} onChange={(e) => setNewActive(e.target.checked)} />
+            Aktiv
+          </label>
+        </section>
+
+        {/* List */}
+        <section className="rounded-2xl border border-gray-800 bg-gray-900 p-5 space-y-4 md:border-gray-200 md:bg-white">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h2 className="font-semibold">Produkter</h2>
+              <div className="text-sm text-gray-400 md:text-gray-600">{items.length} stk</div>
+            </div>
+
+            <button
+              className="rounded-xl border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 hover:bg-gray-900 md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50"
+              onClick={() => {
+                void loadProducts(q);
+                showToast("Oppdatert");
+              }}
+            >
+              Oppdater
+            </button>
           </div>
-        ) : null}
 
-        <div className="flex items-center gap-3">
-          <button
-            disabled={disabled}
-            className="rounded-lg bg-black px-4 py-2 text-sm text-white disabled:opacity-50"
-            onClick={runImport}
-            title={
-              rows.length === 0
-                ? "Velg en fil først"
-                : errors.length > 0
-                ? "Rett feilene før import"
-                : ""
-            }
-          >
-            {importing ? "Importerer…" : "Importer"}
-          </button>
+          {items.length === 0 ? (
+            <div className="rounded-xl border border-gray-800 bg-gray-950 p-4 text-sm text-gray-400 md:border-gray-200 md:bg-gray-50 md:text-gray-600">
+              Ingen produkter funnet.
+            </div>
+          ) : (
+            <div className="grid gap-3">
+              {items.map((p) => {
+                const hasThumb = !!p.thumb_path;
+                const imgUrl = hasThumb ? thumbUrlByPath[p.thumb_path!] ?? null : null;
 
-          <div className="text-sm text-gray-500">
-            {rows.length > 0 ? `Rader klare: ${rows.length}` : ""}
+                return (
+                  <div
+                    key={p.id}
+                    className={cn(
+                      "rounded-xl border p-4",
+                      "border-gray-800 bg-gray-950",
+                      "md:border-gray-200 md:bg-white",
+                      "flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"
+                    )}
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div
+                        className={cn(
+                          "h-12 w-12 rounded-lg border overflow-hidden shrink-0",
+                          "border-gray-800 bg-gray-900",
+                          "md:border-gray-200 md:bg-gray-50",
+                          !hasThumb && "flex items-center justify-center text-xs text-gray-500"
+                        )}
+                        title={p.thumb_path ?? ""}
+                      >
+                        {imgUrl ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img src={imgUrl} alt="" className="h-full w-full object-cover" loading="lazy" />
+                        ) : (
+                          "—"
+                        )}
+                      </div>
+
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <div className="font-semibold">{p.product_no}</div>
+                          <div className="text-gray-300 md:text-gray-600 truncate">
+                            {p.name ?? "(uten navn)"}
+                          </div>
+
+                          <span
+                            className={cn(
+                              "text-xs rounded-full px-2 py-1 border",
+                              (p.is_active ?? true)
+                                ? "border-emerald-900/40 bg-emerald-950/40 text-emerald-200 md:border-green-200 md:bg-green-50 md:text-green-800"
+                                : "border-gray-700 bg-gray-900 text-gray-200 md:border-gray-200 md:bg-gray-50 md:text-gray-700"
+                            )}
+                          >
+                            {(p.is_active ?? true) ? "Aktiv" : "Inaktiv"}
+                          </span>
+                        </div>
+
+                        <div className="text-sm text-gray-300 md:text-gray-600">{formatNok(p.list_price)}</div>
+                        <div className="text-xs text-gray-500 break-all">ID: {p.id}</div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        className="w-full sm:w-auto rounded-xl bg-white px-3 py-2 text-sm font-semibold text-gray-900 hover:opacity-90 md:bg-black md:text-white"
+                        onClick={() => router.push(`/admin/products/${p.id}`)}
+                      >
+                        Åpne / rediger
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <div className="text-xs text-gray-500">
+            Thumbs: bruker Supabase Storage bucket <span className="font-mono">product-images</span> (signed urls).
           </div>
-        </div>
-      </section>
-
-      <section className="rounded-2xl border p-5 space-y-3">
-        <div className="font-semibold">Preview</div>
-        <div className="text-sm text-gray-600">Viser maks 20 rader. Totalt: {rows.length}</div>
-
-        {rows.length === 0 ? (
-          <div className="text-sm text-gray-600">Ingen fil valgt.</div>
-        ) : (
-          <div className="overflow-auto rounded-xl border">
-            <table className="min-w-[1200px] w-full text-sm">
-              <thead className="bg-gray-50">
-                <tr>
-                  <th className="p-2 text-left">product_no</th>
-                  <th className="p-2 text-left">name</th>
-                  <th className="p-2 text-left">list_price</th>
-                  <th className="p-2 text-left">is_active</th>
-                  <th className="p-2 text-left">thumb_path</th>
-                  <th className="p-2 text-left">documents</th>
-                  <th className="p-2 text-left">gallery_images</th>
-                  <th className="p-2 text-left">accessories</th>
-                  <th className="p-2 text-left">spare_parts</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.slice(0, 20).map((r, i) => (
-                  <tr key={i} className="border-t align-top">
-                    <td className="p-2">{r.product_no}</td>
-                    <td className="p-2">{r.name ?? ""}</td>
-                    <td className="p-2">{r.list_price ?? ""}</td>
-                    <td className="p-2">{String(r.is_active ?? true)}</td>
-                    <td className="p-2 font-mono text-[12px]">{r.thumb_path ?? ""}</td>
-                    <td className="p-2 font-mono text-[12px] whitespace-pre-wrap">
-                      {r.documents ?? ""}
-                    </td>
-                    <td className="p-2 font-mono text-[12px] whitespace-pre-wrap">
-                      {r.gallery_images ?? ""}
-                    </td>
-                    <td className="p-2">{r.accessories ?? ""}</td>
-                    <td className="p-2">{r.spare_parts ?? ""}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
+        </section>
+      </div>
     </div>
   );
 }
