@@ -50,6 +50,8 @@ type OrderMessageRow = {
   body: string;
 };
 
+const CONFIRM_BUCKET = "order-confirmations";
+
 function cn(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(" ");
 }
@@ -169,14 +171,6 @@ function humanRole(r: Role | null | undefined) {
   return "Kunde";
 }
 
-// Viktig for catch-all route: encode hver del, ikke hele stien
-function localFileUrl(relativePath: string) {
-  return `/api/local-file/${relativePath
-    .split("/")
-    .map(encodeURIComponent)
-    .join("/")}`;
-}
-
 export default function OrderDetailsPage() {
   const router = useRouter();
   const params = useParams<{ id: string }>();
@@ -207,6 +201,21 @@ export default function OrderDetailsPage() {
   const isAdmin = myRole === "admin";
   const orderId = params?.id;
 
+  async function getFreshToken() {
+    const { data: sessRes, error: sessErr } = await supabase.auth.getSession();
+    if (sessErr) console.error(sessErr);
+
+    let token = sessRes.session?.access_token ?? null;
+
+    if (!token) {
+      const { data: refreshed, error: refreshErr } = await supabase.auth.refreshSession();
+      if (refreshErr) console.error(refreshErr);
+      token = refreshed.session?.access_token ?? null;
+    }
+
+    return token;
+  }
+
   useEffect(() => {
     let alive = true;
 
@@ -230,15 +239,7 @@ export default function OrderDetailsPage() {
       }
 
       // 2) Token (refresh hvis nødvendig)
-      let token: string | null = null;
-      const { data: sessRes } = await supabase.auth.getSession();
-      token = sessRes.session?.access_token ?? null;
-
-      if (!token) {
-        const { data: refreshed } = await supabase.auth.refreshSession();
-        token = refreshed.session?.access_token ?? null;
-      }
-
+      const token = await getFreshToken();
       if (!token) {
         router.replace("/login");
         return;
@@ -409,15 +410,50 @@ export default function OrderDetailsPage() {
     return items.reduce((sum, x) => sum + safeNumber(x.unit_price) * safeNumber(x.qty), 0);
   }, [items]);
 
-  // ✅ Nedlasting: samme mønster som orders/page.tsx (via /api/local-file/<path>)
+  // ✅ Nedlasting: samme strategi som orders/page.tsx:
+  // 1) prøv server-endepunkt /api/orders/:id/confirmation-url
+  // 2) fallback til supabase.storage.createSignedUrl
   async function openConfirmation() {
     const path = order?.confirmation_file_path;
-    if (!path) return;
+    if (!path || !orderId) return;
 
     setDownloading(true);
     try {
-      const url = localFileUrl(path);
-      window.open(url, "_blank", "noopener,noreferrer");
+      const token = await getFreshToken();
+      if (!token) {
+        router.replace("/login");
+        return;
+      }
+
+      // 1) Server-endepunkt (foretrukket)
+      try {
+        const res = await fetch(`/api/orders/${orderId}/confirmation-url`, {
+          method: "GET",
+          headers: { authorization: `Bearer ${token}` },
+        });
+
+        const payload = await res.json().catch(() => null);
+
+        if (res.ok && payload?.url) {
+          window.open(payload.url, "_blank", "noopener,noreferrer");
+          return;
+        }
+
+        console.warn("confirmation-url failed:", res.status, payload);
+      } catch (e) {
+        console.warn("confirmation-url exception:", e);
+      }
+
+      // 2) Fallback: signed url direkte fra Storage
+      const { data, error } = await supabase.storage.from(CONFIRM_BUCKET).createSignedUrl(path, 600);
+
+      if (error || !data?.signedUrl) {
+        console.error("createSignedUrl failed:", error);
+        alert("Kunne ikke hente nedlastingslenke.");
+        return;
+      }
+
+      window.open(data.signedUrl, "_blank", "noopener,noreferrer");
     } finally {
       setDownloading(false);
     }
@@ -431,14 +467,7 @@ export default function OrderDetailsPage() {
 
     setDeleting(true);
     try {
-      const { data: sessionRes } = await supabase.auth.getSession();
-      let token = sessionRes.session?.access_token ?? null;
-
-      if (!token) {
-        const { data: refreshed } = await supabase.auth.refreshSession();
-        token = refreshed.session?.access_token ?? null;
-      }
-
+      const token = await getFreshToken();
       if (!token) {
         router.replace("/login");
         return;
@@ -525,7 +554,7 @@ export default function OrderDetailsPage() {
     return (
       <div className="min-h-screen bg-gray-950 text-gray-100 md:bg-white md:text-gray-900 p-6 space-y-4">
         <button
-          className="rounded-xl border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-gray-100 hover:bg-gray-800 md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50"
+          className="rounded-xl border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-gray-100 hover:bg-gray-800 md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50 transition-colors"
           onClick={() => router.push("/orders")}
         >
           ← Tilbake til ordreoversikt
@@ -547,7 +576,7 @@ export default function OrderDetailsPage() {
         <div className="mx-auto max-w-5xl px-4 md:px-6 py-3">
           <header className="flex flex-wrap items-center justify-between gap-3">
             <button
-              className="rounded-xl border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-gray-100 hover:bg-gray-800 md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50"
+              className="rounded-xl border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-gray-100 hover:bg-gray-800 md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50 transition-colors"
               onClick={() => router.push("/orders")}
             >
               ← Mine bestillinger
@@ -555,13 +584,13 @@ export default function OrderDetailsPage() {
 
             <div className="flex items-center gap-2">
               <button
-                className="rounded-xl border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-gray-100 hover:bg-gray-800 md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50"
+                className="rounded-xl border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-gray-100 hover:bg-gray-800 md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50 transition-colors"
                 onClick={() => router.push("/products")}
               >
                 Produkter
               </button>
               <button
-                className="rounded-xl border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-gray-100 hover:bg-gray-800 md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50"
+                className="rounded-xl border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-gray-100 hover:bg-gray-800 md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50 transition-colors"
                 onClick={() => router.push("/cart")}
               >
                 Handlevogn
@@ -581,14 +610,10 @@ export default function OrderDetailsPage() {
                 Opprettet: {formatDateTime(order.created_at)}
               </div>
 
-              <div className="text-lg font-semibold text-gray-100 md:text-gray-900">
-                {order.project_name}
-              </div>
+              <div className="text-lg font-semibold text-gray-100 md:text-gray-900">{order.project_name}</div>
 
               {order.project_no ? (
-                <div className="text-sm text-gray-300 md:text-gray-600">
-                  Prosjekt nr: {order.project_no}
-                </div>
+                <div className="text-sm text-gray-300 md:text-gray-600">Prosjekt nr: {order.project_no}</div>
               ) : null}
 
               <div
@@ -616,15 +641,15 @@ export default function OrderDetailsPage() {
                         diff < 0
                           ? "text-red-300 md:text-red-700"
                           : diff <= 3
-                          ? "text-amber-300 md:text-amber-700"
-                          : "text-gray-400 md:text-gray-600"
+                            ? "text-amber-300 md:text-amber-700"
+                            : "text-gray-400 md:text-gray-600"
                       )}
                     >
                       {diff < 0
                         ? `${Math.abs(diff)} dager forsinket`
                         : diff === 0
-                        ? "Levering i dag"
-                        : `${diff} dager til levering`}
+                          ? "Levering i dag"
+                          : `${diff} dager til levering`}
                     </div>
                   ) : null}
                 </div>
@@ -648,13 +673,13 @@ export default function OrderDetailsPage() {
                 <button
                   disabled={downloading}
                   className={cn(
-                    "rounded-xl px-4 py-2 text-sm text-gray-100 disabled:opacity-50",
+                    "rounded-xl px-4 py-2 text-sm text-gray-100 disabled:opacity-50 transition-colors",
                     "bg-white/10 hover:bg-white/15",
-                    "md:bg-black md:text-white md:hover:bg-black/90" // ✅ ikke bruk opacity-hover (kan “forsvinne” visuelt)
+                    "md:bg-black md:text-white md:hover:bg-black/90"
                   )}
                   onClick={openConfirmation}
                 >
-                  {downloading ? "Åpner…" : "Last ned ordrebekreftelse"}
+                  {downloading ? "Henter lenke…" : "Last ned ordrebekreftelse"}
                 </button>
               ) : (
                 <div className="rounded-xl border border-gray-800 bg-gray-950/40 px-4 py-2 text-sm text-gray-300 md:border-gray-200 md:bg-white md:text-gray-600">
@@ -663,16 +688,13 @@ export default function OrderDetailsPage() {
               )}
 
               <div className="rounded-xl border border-gray-800 bg-gray-950/40 px-4 py-2 text-sm md:border-gray-200 md:bg-white">
-                Sum:{" "}
-                <span className="font-semibold text-gray-100 md:text-gray-900">
-                  {formatNok(total)}
-                </span>
+                Sum: <span className="font-semibold text-gray-100 md:text-gray-900">{formatNok(total)}</span>
               </div>
 
               {isAdmin ? (
                 <button
                   disabled={deleting}
-                  className="rounded-xl border border-red-700/50 bg-red-950/30 px-4 py-2 text-sm text-red-200 hover:bg-red-950/45 disabled:opacity-50 md:border-red-200 md:bg-white md:text-red-700 md:hover:bg-red-50"
+                  className="rounded-xl border border-red-700/50 bg-red-950/30 px-4 py-2 text-sm text-red-200 hover:bg-red-950/45 disabled:opacity-50 md:border-red-200 md:bg-white md:text-red-700 md:hover:bg-red-50 transition-colors"
                   onClick={deleteOrder}
                   title="Slett ordre"
                 >
@@ -696,14 +718,12 @@ export default function OrderDetailsPage() {
               </div>
               {order.contact_phone ? (
                 <div className="text-gray-200 md:text-gray-800">
-                  <span className="text-gray-400 md:text-gray-600">Telefon:</span>{" "}
-                  {order.contact_phone}
+                  <span className="text-gray-400 md:text-gray-600">Telefon:</span> {order.contact_phone}
                 </div>
               ) : null}
               {order.contact_email ? (
                 <div className="text-gray-200 md:text-gray-800">
-                  <span className="text-gray-400 md:text-gray-600">E-post:</span>{" "}
-                  {order.contact_email}
+                  <span className="text-gray-400 md:text-gray-600">E-post:</span> {order.contact_email}
                 </div>
               ) : null}
             </div>
@@ -712,9 +732,7 @@ export default function OrderDetailsPage() {
           <section className="rounded-2xl border border-gray-800 bg-gray-900/40 p-4 md:p-5 md:border-gray-200 md:bg-white space-y-3">
             <h2 className="font-semibold text-gray-100 md:text-gray-900">Levering</h2>
             <div className="text-sm space-y-1">
-              <div className="whitespace-pre-line text-gray-200 md:text-gray-800">
-                {order.delivery_address}
-              </div>
+              <div className="whitespace-pre-line text-gray-200 md:text-gray-800">{order.delivery_address}</div>
               <div className="text-gray-200 md:text-gray-800">
                 {[order.delivery_postcode, order.delivery_city].filter(Boolean).join(" ")}
               </div>
@@ -726,9 +744,7 @@ export default function OrderDetailsPage() {
         {order.comment ? (
           <section className="rounded-2xl border border-gray-800 bg-gray-900/40 p-4 md:p-5 md:border-gray-200 md:bg-white space-y-2">
             <h2 className="font-semibold text-gray-100 md:text-gray-900">Kommentar</h2>
-            <p className="text-sm text-gray-200 md:text-gray-800 whitespace-pre-line">
-              {order.comment}
-            </p>
+            <p className="text-sm text-gray-200 md:text-gray-800 whitespace-pre-line">{order.comment}</p>
           </section>
         ) : null}
 
@@ -763,7 +779,7 @@ export default function OrderDetailsPage() {
 
                           <div className="mt-2">
                             <button
-                              className="rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-xs text-gray-100 hover:bg-gray-800"
+                              className="rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-xs text-gray-100 hover:bg-gray-800 transition-colors"
                               onClick={() => router.push(`/products/${x.product_id}`)}
                               title="Åpne produkt for dokumenter og detaljer"
                             >
@@ -815,13 +831,11 @@ export default function OrderDetailsPage() {
                           <td className="border-b py-2 pr-3 font-medium">{x.product_no}</td>
                           <td className="border-b py-2 pr-3">{x.name}</td>
                           <td className="border-b py-2 pr-3 text-right">{x.qty}</td>
-                          <td className="border-b py-2 pr-3 text-right">
-                            {formatNok(safeNumber(x.unit_price))}
-                          </td>
+                          <td className="border-b py-2 pr-3 text-right">{formatNok(safeNumber(x.unit_price))}</td>
                           <td className="border-b py-2 pr-3 text-right">{formatNok(line)}</td>
                           <td className="border-b py-2 text-right">
                             <button
-                              className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs text-gray-900 hover:bg-gray-50"
+                              className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs text-gray-900 hover:bg-gray-50 transition-colors"
                               onClick={() => router.push(`/products/${x.product_id}`)}
                               title="Åpne produkt for dokumenter og detaljer"
                             >
@@ -850,9 +864,7 @@ export default function OrderDetailsPage() {
         <section className="rounded-2xl border border-gray-800 bg-gray-900/40 p-4 md:p-5 md:border-gray-200 md:bg-white space-y-3">
           <div className="flex items-center justify-between gap-3">
             <h2 className="font-semibold text-gray-100 md:text-gray-900">Internchat</h2>
-            <div className="text-xs text-gray-400 md:text-gray-500">
-              Innkjøper og kunde kan kommunisere her
-            </div>
+            <div className="text-xs text-gray-400 md:text-gray-500">Innkjøper og kunde kan kommunisere her</div>
           </div>
 
           {!chatEnabled ? (
@@ -869,18 +881,13 @@ export default function OrderDetailsPage() {
           ) : null}
 
           <div
-            className={cn(
-              "rounded-xl border p-3",
-              "border-gray-800 bg-gray-950 md:border-gray-200 md:bg-gray-50"
-            )}
+            className={cn("rounded-xl border p-3", "border-gray-800 bg-gray-950 md:border-gray-200 md:bg-gray-50")}
             style={{ maxHeight: 340, overflow: "auto" }}
           >
             {msgLoading ? (
               <div className="text-sm text-gray-400 md:text-gray-600">Laster meldinger…</div>
             ) : messages.length === 0 ? (
-              <div className="text-sm text-gray-400 md:text-gray-600">
-                Ingen meldinger enda. Skriv en melding under.
-              </div>
+              <div className="text-sm text-gray-400 md:text-gray-600">Ingen meldinger enda. Skriv en melding under.</div>
             ) : (
               <div className="space-y-3">
                 {messages.map((m) => {
@@ -901,17 +908,11 @@ export default function OrderDetailsPage() {
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div className="text-xs text-gray-300 md:text-gray-600">
                           <span className="font-medium text-gray-100 md:text-gray-900">{who}</span>
-                          <span className="ml-2 text-[11px] text-gray-400 md:text-gray-500">
-                            · {humanRole(role)}
-                          </span>
+                          <span className="ml-2 text-[11px] text-gray-400 md:text-gray-500">· {humanRole(role)}</span>
                         </div>
-                        <div className="text-[11px] text-gray-400 md:text-gray-500">
-                          {formatDateTime(m.created_at)}
-                        </div>
+                        <div className="text-[11px] text-gray-400 md:text-gray-500">{formatDateTime(m.created_at)}</div>
                       </div>
-                      <div className="mt-1 whitespace-pre-wrap text-sm text-gray-100 md:text-gray-900">
-                        {m.body}
-                      </div>
+                      <div className="mt-1 whitespace-pre-wrap text-sm text-gray-100 md:text-gray-900">{m.body}</div>
                     </div>
                   );
                 })}
@@ -937,9 +938,9 @@ export default function OrderDetailsPage() {
               onClick={sendMessage}
               disabled={!chatEnabled || !msgText.trim()}
               className={cn(
-                "shrink-0 rounded-xl px-4 py-2 text-sm font-medium disabled:opacity-50",
+                "shrink-0 rounded-xl px-4 py-2 text-sm font-medium disabled:opacity-50 transition-colors",
                 "bg-white/10 hover:bg-white/15",
-                "md:bg-black md:text-white md:hover:bg-black/90" // ✅ ikke bruk opacity-hover
+                "md:bg-black md:text-white md:hover:bg-black/90"
               )}
               title="Send"
             >
