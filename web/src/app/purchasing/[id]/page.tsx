@@ -25,10 +25,10 @@ type OrderRow = {
 
   comment: string | null;
 
-  expected_delivery_date: string | null; // stored as ISO-ish string/date in DB
+  expected_delivery_date: string | null;
   delivery_info: string | null;
 
-  confirmation_file_path: string | null; // storage path
+  confirmation_file_path: string | null;
   purchaser_note: string | null;
 
   updated_at?: string | null;
@@ -45,7 +45,6 @@ type OrderMessageRow = {
   body: string;
 };
 
-// ✅ ADDED: Order item rows (same shape as customer side)
 type OrderItemRow = {
   id: string;
   order_id: string;
@@ -119,6 +118,25 @@ function looksLikeMissingTable(err: any, table: string) {
   );
 }
 
+function userErrorMessage(err: any) {
+  const msg = String(err?.message ?? "").toLowerCase();
+
+  if (!msg) return "Noe gikk galt. Prøv igjen.";
+  if (msg.includes("jwt")) return "Du er logget ut. Logg inn på nytt.";
+  if (msg.includes("permission") || msg.includes("row-level security")) return "Du har ikke tilgang.";
+  if (msg.includes("timeout") || msg.includes("network")) return "Nettverksfeil. Prøv igjen.";
+
+  if (
+    msg.includes("does not exist") ||
+    msg.includes("schema cache") ||
+    msg.includes("could not find the table")
+  ) {
+    return "Systemet mangler en oppdatering. Kontakt administrator.";
+  }
+
+  return "Noe gikk galt. Prøv igjen.";
+}
+
 function isOrderRow(x: unknown): x is OrderRow {
   if (!x || typeof x !== "object") return false;
   const o = x as any;
@@ -132,18 +150,14 @@ function isOrderRow(x: unknown): x is OrderRow {
   );
 }
 
-/** Accepts ISO date (YYYY-MM-DD) or ISO datetime and formats to DD.MM.YYYY */
 function isoToNorDate(iso: string | null | undefined): string {
   if (!iso) return "";
   const s = String(iso).trim();
-  // already dd.mm.yyyy?
   if (/^\d{2}\.\d{2}\.\d{4}$/.test(s)) return s;
 
-  // try YYYY-MM-DD first
   const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (m) return `${m[3]}.${m[2]}.${m[1]}`;
 
-  // fallback: Date parse
   try {
     const d = new Date(s);
     if (Number.isNaN(d.getTime())) return "";
@@ -156,11 +170,6 @@ function isoToNorDate(iso: string | null | undefined): string {
   }
 }
 
-/**
- * ✅ ADDED: Formats ETA input so mobile "numeric" keyboards work.
- * - User can type 05032026 and it becomes 05.03.2026 automatically.
- * - We still allow dots if user has them.
- */
 function formatEtaInput(raw: string): string {
   const digits = String(raw ?? "").replace(/\D/g, "").slice(0, 8);
   if (digits.length <= 2) return digits;
@@ -168,12 +177,10 @@ function formatEtaInput(raw: string): string {
   return `${digits.slice(0, 2)}.${digits.slice(2, 4)}.${digits.slice(4)}`;
 }
 
-/** Parses DD.MM.YYYY -> YYYY-MM-DD. Returns null if empty. Throws on invalid */
 function norDateToIso(input: string): string | null {
   const raw = String(input ?? "").trim();
   if (!raw) return null;
 
-  // ✅ ADDED: accept 8 digits (DDMMYYYY) as well
   const onlyDigits = raw.replace(/\D/g, "");
   if (/^\d{8}$/.test(onlyDigits)) {
     const dd = Number(onlyDigits.slice(0, 2));
@@ -206,7 +213,6 @@ function norDateToIso(input: string): string | null {
   if (mm < 1 || mm > 12) throw new Error("Ugyldig måned.");
   if (dd < 1 || dd > 31) throw new Error("Ugyldig dag.");
 
-  // real calendar validation
   const d = new Date(Date.UTC(yyyy, mm - 1, dd));
   const ok =
     d.getUTCFullYear() === yyyy && d.getUTCMonth() === mm - 1 && d.getUTCDate() === dd;
@@ -224,14 +230,8 @@ function humanRole(r: Role) {
   return "Kunde";
 }
 
-/**
- * Storage bucket for order confirmations.
- * Ensure this bucket exists in Supabase Storage (private or public).
- * Recommended: private bucket + signed URL.
- */
 const CONFIRM_BUCKET = "order-confirmations";
 
-// ✅ ADDED: price formatting helpers
 function safeNumber(n: unknown) {
   const x = typeof n === "number" ? n : Number(n);
   return Number.isFinite(x) ? x : 0;
@@ -265,19 +265,17 @@ export default function PurchasingOrderPage() {
   const [order, setOrder] = useState<OrderRow | null>(null);
 
   const [status, setStatus] = useState<Status>("SUBMITTED");
-  const [etaNor, setEtaNor] = useState(""); // DD.MM.YYYY in UI
+  const [etaNor, setEtaNor] = useState("");
   const [info, setInfo] = useState("");
   const [confirmPath, setConfirmPath] = useState("");
   const [note, setNote] = useState("");
 
   const [busy, setBusy] = useState(false);
 
-  // Upload
   const fileRef = useRef<HTMLInputElement | null>(null);
   const [uploadBusy, setUploadBusy] = useState(false);
   const [confirmSignedUrl, setConfirmSignedUrl] = useState<string | null>(null);
 
-  // Chat
   const [chatEnabled, setChatEnabled] = useState(true);
   const [messages, setMessages] = useState<OrderMessageRow[]>([]);
   const [msgLoading, setMsgLoading] = useState(false);
@@ -285,7 +283,6 @@ export default function PurchasingOrderPage() {
   const [msgText, setMsgText] = useState("");
   const msgEndRef = useRef<HTMLDivElement | null>(null);
 
-  // ✅ ADDED: Order items state
   const [items, setItems] = useState<OrderItemRow[]>([]);
   const [itemsLoading, setItemsLoading] = useState(false);
   const [itemsErr, setItemsErr] = useState<string | null>(null);
@@ -303,7 +300,6 @@ export default function PurchasingOrderPage() {
         return;
       }
 
-      // access token til /api/auth/me
       let token: string | null = null;
       const { data: sess } = await supabase.auth.getSession();
       token = sess.session?.access_token ?? null;
@@ -318,7 +314,6 @@ export default function PurchasingOrderPage() {
         return;
       }
 
-      // rolle + display_name via /api/auth/me
       try {
         const meRes = await fetch("/api/auth/me", {
           method: "GET",
@@ -346,7 +341,6 @@ export default function PurchasingOrderPage() {
         return;
       }
 
-      // hent ordre
       const selectWithUpdated = [
         "id",
         "created_at",
@@ -404,8 +398,7 @@ export default function PurchasingOrderPage() {
       if (!alive) return;
 
       if (res.error) {
-        console.error(res.error);
-        setErr(res.error.message);
+        setErr(userErrorMessage(res.error));
         setOrder(null);
         setLoading(false);
         return;
@@ -414,7 +407,7 @@ export default function PurchasingOrderPage() {
       const dataUnknown: unknown = (res as any).data ?? null;
 
       if (!isOrderRow(dataUnknown)) {
-        setErr("Ordre ikke funnet, eller mangler påkrevde felt.");
+        setErr("Ordre ikke funnet.");
         setOrder(null);
         setLoading(false);
         return;
@@ -440,7 +433,6 @@ export default function PurchasingOrderPage() {
     };
   }, [id, router, supabase]);
 
-  // ✅ ADDED: Load order items (best-effort)
   useEffect(() => {
     let alive = true;
 
@@ -460,13 +452,11 @@ export default function PurchasingOrderPage() {
         if (res.error) {
           if (looksLikeMissingTable(res.error, "order_items")) {
             setItems([]);
-            setItemsErr(
-              'Ordrelinjer er ikke aktivert ennå (mangler tabell "order_items"). Si fra, så legger vi SQL-migrering.'
-            );
+            setItemsErr("Ordrelinjer er ikke tilgjengelig i systemet enda.");
             return;
           }
           setItems([]);
-          setItemsErr(res.error.message);
+          setItemsErr(userErrorMessage(res.error));
           return;
         }
 
@@ -486,12 +476,9 @@ export default function PurchasingOrderPage() {
   }, [id, supabase]);
 
   const itemsTotal = useMemo(() => {
-    return (items ?? []).reduce((sum, it) => {
-      return sum + safeNumber(it.qty) * safeNumber(it.unit_price);
-    }, 0);
+    return (items ?? []).reduce((sum, it) => sum + safeNumber(it.qty) * safeNumber(it.unit_price), 0);
   }, [items]);
 
-  // Signed URL for confirmation download (if private bucket)
   useEffect(() => {
     let alive = true;
 
@@ -499,8 +486,6 @@ export default function PurchasingOrderPage() {
       setConfirmSignedUrl(null);
       if (!confirmPath) return;
 
-      // If your system uses /api/local-file for downloads, you can swap to that here.
-      // For Storage bucket, we generate signed URL:
       try {
         const { data, error } = await supabase.storage
           .from(CONFIRM_BUCKET)
@@ -509,15 +494,12 @@ export default function PurchasingOrderPage() {
         if (!alive) return;
 
         if (error) {
-          // Don't hard-fail the page; just don't show URL
-          console.warn("signedUrl failed:", error);
           setConfirmSignedUrl(null);
           return;
         }
 
         setConfirmSignedUrl(data?.signedUrl ?? null);
-      } catch (e) {
-        console.warn("signedUrl exception:", e);
+      } catch {
         setConfirmSignedUrl(null);
       }
     })();
@@ -572,8 +554,7 @@ export default function PurchasingOrderPage() {
       }
 
       if (upd.error) {
-        console.error(upd.error);
-        setErr(upd.error.message);
+        setErr(userErrorMessage(upd.error));
         return;
       }
 
@@ -615,21 +596,12 @@ export default function PurchasingOrderPage() {
       });
 
       if (error) {
-        // Common: bucket missing
-        if (String(error.message).toLowerCase().includes("bucket")) {
-          setErr(
-            `Upload feilet: Storage-bucket "${CONFIRM_BUCKET}" finnes ikke (eller du mangler tilgang). Lag bucketen i Supabase Storage, eller juster bucket-navnet i koden.`
-          );
-        } else {
-          setErr(`Upload feilet: ${error.message}`);
-        }
+        setErr("Kunne ikke laste opp filen. Prøv igjen.");
         return;
       }
 
-      // Store path on order
       setConfirmPath(path);
 
-      // Save immediately so customer sees it
       const nowIso = new Date().toISOString();
       const payload: Record<string, any> = {
         confirmation_file_path: path,
@@ -651,7 +623,7 @@ export default function PurchasingOrderPage() {
       }
 
       if (upd.error) {
-        setErr(upd.error.message);
+        setErr(userErrorMessage(upd.error));
         return;
       }
 
@@ -669,14 +641,12 @@ export default function PurchasingOrderPage() {
       setToast("Ordrebekreftelse lastet opp");
       window.setTimeout(() => setToast(null), 1400);
 
-      // reset input
       if (fileRef.current) fileRef.current.value = "";
     } finally {
       setUploadBusy(false);
     }
   }
 
-  // Chat: load + realtime subscription
   useEffect(() => {
     let alive = true;
 
@@ -697,12 +667,10 @@ export default function PurchasingOrderPage() {
           if (looksLikeMissingTable(res.error, "order_messages")) {
             setChatEnabled(false);
             setMessages([]);
-            setMsgErr(
-              'Chat er ikke aktivert ennå (mangler tabell "order_messages"). Si fra, så legger vi SQL-migrering for dette.'
-            );
+            setMsgErr("Chat er ikke tilgjengelig i systemet enda.");
             return;
           }
-          setMsgErr(res.error.message);
+          setMsgErr(userErrorMessage(res.error));
           setMessages([]);
           return;
         }
@@ -715,7 +683,6 @@ export default function PurchasingOrderPage() {
 
     loadMessages();
 
-    // Realtime (best-effort). Requires Realtime enabled for table.
     const channel = supabase
       .channel(`order_messages:${id}`)
       .on(
@@ -740,7 +707,6 @@ export default function PurchasingOrderPage() {
   }, [id, supabase]);
 
   useEffect(() => {
-    // auto-scroll chat to bottom
     if (!msgEndRef.current) return;
     msgEndRef.current.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages.length]);
@@ -764,19 +730,14 @@ export default function PurchasingOrderPage() {
       if (ins.error) {
         if (looksLikeMissingTable(ins.error, "order_messages")) {
           setChatEnabled(false);
-          setMsgErr(
-            'Chat er ikke aktivert ennå (mangler tabell "order_messages"). Si fra, så legger vi SQL-migrering for dette.'
-          );
+          setMsgErr("Chat er ikke tilgjengelig i systemet enda.");
           return;
         }
-        setMsgErr(ins.error.message);
+        setMsgErr(userErrorMessage(ins.error));
         return;
       }
 
       setMsgText("");
-      // optimistic update is not necessary if realtime is enabled, but keep a safety fetch-less UX:
-      // if realtime isn't working, we can append a local echo by refetching minimal:
-      // We'll just append locally if no realtime arrives soon.
       setMessages((prev) => [
         ...prev,
         {
@@ -790,7 +751,7 @@ export default function PurchasingOrderPage() {
         },
       ]);
     } catch (e: any) {
-      setMsgErr(String(e?.message ?? "Ukjent feil ved sending."));
+      setMsgErr(userErrorMessage(e));
     }
   }
 
@@ -824,9 +785,7 @@ export default function PurchasingOrderPage() {
         >
           ← Tilbake
         </button>
-        <div className="rounded-lg border p-4 text-sm text-red-700">
-          {err ?? "Ordre ikke funnet."}
-        </div>
+        <div className="rounded-lg border p-4 text-sm text-red-700">{err ?? "Ordre ikke funnet."}</div>
       </div>
     );
   }
@@ -867,7 +826,6 @@ export default function PurchasingOrderPage() {
           </div>
         ) : null}
 
-        {/* Order card */}
         <div
           className={cn(
             "rounded-2xl border p-4 space-y-3",
@@ -901,7 +859,6 @@ export default function PurchasingOrderPage() {
             ) : null}
           </div>
 
-          {/* ✅ ADDED: Customer comment visible on purchasing page (same as orders/[id]) */}
           {order.comment ? (
             <section
               className={cn(
@@ -916,7 +873,6 @@ export default function PurchasingOrderPage() {
             </section>
           ) : null}
 
-          {/* ✅ ADDED: Order items + total + per-product button */}
           <div
             className={cn(
               "rounded-2xl border p-4 space-y-3",
@@ -924,9 +880,7 @@ export default function PurchasingOrderPage() {
             )}
           >
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="text-sm font-semibold text-gray-100 md:text-gray-900">
-                Ordrelinjer
-              </div>
+              <div className="text-sm font-semibold text-gray-100 md:text-gray-900">Ordrelinjer</div>
               <div className="text-xs text-gray-300 md:text-gray-600">
                 Totalt:{" "}
                 <span className="font-semibold text-gray-100 md:text-gray-900">
@@ -944,9 +898,7 @@ export default function PurchasingOrderPage() {
             {itemsLoading ? (
               <div className="text-sm text-gray-400 md:text-gray-600">Laster ordrelinjer…</div>
             ) : items.length === 0 ? (
-              <div className="text-sm text-gray-400 md:text-gray-600">
-                Ingen ordrelinjer funnet.
-              </div>
+              <div className="text-sm text-gray-400 md:text-gray-600">Ingen ordrelinjer funnet.</div>
             ) : (
               <div className="space-y-2">
                 {items.map((it) => {
@@ -964,9 +916,7 @@ export default function PurchasingOrderPage() {
                           <div className="text-xs text-gray-400 md:text-gray-500 font-mono">
                             {it.product_no}
                           </div>
-                          <div className="text-sm text-gray-100 md:text-gray-900 truncate">
-                            {it.name}
-                          </div>
+                          <div className="text-sm text-gray-100 md:text-gray-900 truncate">{it.name}</div>
                           <div className="mt-1 text-xs text-gray-300 md:text-gray-600">
                             Antall: <span className="font-medium">{it.qty}</span> · Enhetspris:{" "}
                             <span className="font-medium">{formatNok(safeNumber(it.unit_price))}</span>
@@ -983,10 +933,7 @@ export default function PurchasingOrderPage() {
                               "rounded-lg border px-3 py-2 text-sm",
                               "border-gray-700 hover:bg-gray-900 md:border-gray-300 md:hover:bg-gray-50"
                             )}
-                            onClick={() => {
-                              // NOTE: adjust route if customer side uses a different product route
-                              router.push(`/products/${it.product_id}`);
-                            }}
+                            onClick={() => router.push(`/products/${it.product_id}`)}
                             title="Åpne produkt"
                           >
                             Åpne produkt
@@ -1051,18 +998,15 @@ export default function PurchasingOrderPage() {
               />
             </label>
 
-            {/* ✅ Restore: upload order confirmation */}
             <div className="space-y-2">
               <div className="text-sm font-medium">Ordrebekreftelse</div>
 
               {confirmPath ? (
                 <div className="text-xs text-gray-400 md:text-gray-600 break-words">
-                  Lagringssti: <span className="font-mono">{confirmPath}</span>
+                  Fil: <span className="font-mono">{confirmPath}</span>
                 </div>
               ) : (
-                <div className="text-xs text-gray-400 md:text-gray-600">
-                  Ingen ordrebekreftelse lastet opp.
-                </div>
+                <div className="text-xs text-gray-400 md:text-gray-600">Ingen ordrebekreftelse lastet opp.</div>
               )}
 
               <div className="flex flex-wrap items-center gap-2">
@@ -1097,15 +1041,7 @@ export default function PurchasingOrderPage() {
                   </a>
                 ) : null}
               </div>
-
-              <div className="text-[11px] text-gray-500 md:text-gray-500">
-                Lagrer i Supabase Storage-bucket:{" "}
-                <span className="font-mono">{CONFIRM_BUCKET}</span>
-              </div>
             </div>
-
-            {/* ✅ REMOVED: Innkjøpernotat (internt) — replaced by chat */}
-            {/* NOTE: We keep state/DB field intact (purchaser_note), but hide the UI input as requested. */}
 
             <button
               disabled={busy}
@@ -1122,7 +1058,6 @@ export default function PurchasingOrderPage() {
           </div>
         </div>
 
-        {/* Chat */}
         <div
           className={cn(
             "rounded-2xl border p-4 space-y-3",
@@ -1136,8 +1071,7 @@ export default function PurchasingOrderPage() {
 
           {!chatEnabled ? (
             <div className="rounded-xl border border-amber-700/40 bg-amber-950/40 px-4 py-3 text-sm text-amber-200 md:border-amber-200 md:bg-white md:text-amber-800">
-              {msgErr ??
-                'Chat er ikke aktivert ennå. Opprett tabell "order_messages" i databasen, så fungerer dette.'}
+              {msgErr ?? "Chat er ikke tilgjengelig i systemet enda."}
             </div>
           ) : null}
 
@@ -1157,15 +1091,14 @@ export default function PurchasingOrderPage() {
             {msgLoading ? (
               <div className="text-sm text-gray-400 md:text-gray-600">Laster meldinger…</div>
             ) : messages.length === 0 ? (
-              <div className="text-sm text-gray-400 md:text-gray-600">
-                Ingen meldinger enda. Start en samtale.
-              </div>
+              <div className="text-sm text-gray-400 md:text-gray-600">Ingen meldinger enda.</div>
             ) : (
               <div className="space-y-3">
                 {messages.map((m) => {
                   const isMe = normEmail(m.sender_email) === normEmail(myEmail);
                   const who = m.sender_name || m.sender_email || "Ukjent";
                   const role = (m.sender_role as Role | null) ?? null;
+
                   return (
                     <div
                       key={m.id}
@@ -1225,17 +1158,8 @@ export default function PurchasingOrderPage() {
               Send
             </button>
           </div>
-
-          <div className="text-[11px] text-gray-500 md:text-gray-500">
-            NB: For at chat skal fungere må databasen ha tabell{" "}
-            <span className="font-mono">order_messages</span>.
-          </div>
-        </div>
-
-        <div className="text-xs text-gray-400 md:text-gray-500">
-          Status-visning: <span className="font-medium">{STATUS_LABEL[status]}</span>
         </div>
       </div>
     </div>
   );
-}   
+}
