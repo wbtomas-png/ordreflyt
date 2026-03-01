@@ -24,10 +24,12 @@ type OrderRow = {
   updated_at?: string | null;
   updated_by_name?: string | null;
 
-  // 👇 nye (kan mangle i DB – vi håndterer fallback)
+  // kan mangle i DB
   customer_id?: string | null;
   customer_name?: string | null;
 };
+
+const CONFIRM_BUCKET = "order-confirmations";
 
 function cn(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(" ");
@@ -125,9 +127,7 @@ function statusTone(status: string): "green" | "yellow" | "red" | "neutral" {
   return "neutral";
 }
 
-// Mobil: mørk base. Desktop: lys base.
 function badgeClass(tone: ReturnType<typeof statusTone>) {
-  // base (mobile dark)
   const base = "border px-3 py-1 text-xs rounded-full";
   const md = "md:text-sm md:border";
 
@@ -173,7 +173,6 @@ export default function OrdersPage() {
   const router = useRouter();
   const supabase = useMemo(() => supabaseBrowser(), []);
 
-  // ✅ invite-only + rolle fra server
   const { me, loading: meLoading } = useRequireMe();
 
   const [rows, setRows] = useState<OrderRow[]>([]);
@@ -188,8 +187,8 @@ export default function OrdersPage() {
   // 🔎 Filtre
   const [q, setQ] = useState<string>("");
   const [customerFilter, setCustomerFilter] = useState<string>("__ALL__");
-  const [fromDate, setFromDate] = useState<string>(""); // YYYY-MM-DD
-  const [toDate, setToDate] = useState<string>(""); // YYYY-MM-DD
+  const [fromDate, setFromDate] = useState<string>("");
+  const [toDate, setToDate] = useState<string>("");
 
   const myRole: Role = (me?.role as Role) ?? "kunde";
   const myDisplayName = (me?.display_name ? String(me.display_name).trim() : "") || "—";
@@ -226,7 +225,6 @@ export default function OrdersPage() {
       setLoading(true);
       setErr(null);
 
-      // Vi prøver å hente kunde-felter også. Hvis de ikke finnes i DB, faller vi tilbake.
       const selectFull =
         "id, created_at, status, project_name, project_no, expected_delivery_date, delivery_info, confirmation_file_path, updated_at, updated_by_name, customer_id, customer_name";
 
@@ -248,12 +246,10 @@ export default function OrdersPage() {
           looksLikeMissingColumn(error, "customer_id") ||
           looksLikeMissingColumn(error, "customer_name"))
       ) {
-        // Prøv uten customer_* først
         const r2 = await supabase.from("orders").select(selectNoCustomer).order("created_at", { ascending: false });
         data = (r2.data as unknown[]) ?? null;
         error = r2.error;
 
-        // Hvis det fortsatt feiler pga updated_*, prøv helt base.
         if (error && (looksLikeMissingColumn(error, "updated_at") || looksLikeMissingColumn(error, "updated_by_name"))) {
           const r3 = await supabase.from("orders").select(selectBase).order("created_at", { ascending: false });
           data = (r3.data as unknown[]) ?? null;
@@ -290,15 +286,13 @@ export default function OrdersPage() {
   }, [rows]);
 
   const customerOptions = useMemo(() => {
-    // Dropdown basert på data vi faktisk har.
-    // Hvis customer_name mangler helt, vil listen bli tom (bortsett fra "Alle").
-    const uniq = new Map<string, string>(); // key -> label
+    const uniq = new Map<string, string>();
     for (const r of rows) {
       const name = (r.customer_name ? String(r.customer_name).trim() : "") || "";
       const id = (r.customer_id ? String(r.customer_id).trim() : "") || "";
       if (!name && !id) continue;
 
-      const key = id || name; // stabil nøkkel hvis vi har id
+      const key = id || name;
       const label = name || id;
       if (!uniq.has(key)) uniq.set(key, label);
     }
@@ -316,29 +310,21 @@ export default function OrdersPage() {
     const toTs = toD ? endOfDay(toD).getTime() : null;
 
     return sorted.filter((o) => {
-      // Kunde-filter (kun relevant hvis vi faktisk har kunde-data)
       if (canFilterCustomers && customerFilter !== "__ALL__") {
-        const key = (o.customer_id ? String(o.customer_id).trim() : "") || (o.customer_name ? String(o.customer_name).trim() : "");
+        const key =
+          (o.customer_id ? String(o.customer_id).trim() : "") ||
+          (o.customer_name ? String(o.customer_name).trim() : "");
         if (key !== customerFilter) return false;
       }
 
-      // Dato-filter på created_at
       const createdTs = new Date(o.created_at).getTime();
       if (Number.isFinite(createdTs)) {
         if (fromTs !== null && createdTs < fromTs) return false;
         if (toTs !== null && createdTs > toTs) return false;
       }
 
-      // Søk: kunde, prosjektnavn, prosjekt nr
       if (query) {
-        const hay = [
-          o.customer_name ?? "",
-          o.project_name ?? "",
-          o.project_no ?? "",
-        ]
-          .join(" · ")
-          .toLowerCase();
-
+        const hay = [o.customer_name ?? "", o.project_name ?? "", o.project_no ?? ""].join(" · ").toLowerCase();
         if (!hay.includes(query)) return false;
       }
 
@@ -346,7 +332,9 @@ export default function OrdersPage() {
     });
   }, [sorted, q, fromDate, toDate, canFilterCustomers, customerFilter]);
 
-  async function openConfirmation(orderId: string) {
+  async function openConfirmation(orderId: string, confirmationPath: string | null) {
+    if (!confirmationPath) return;
+
     setDownloadingId(orderId);
     setErr(null);
 
@@ -357,18 +345,36 @@ export default function OrdersPage() {
         return;
       }
 
-      const res = await fetch(`/api/orders/${orderId}/confirmation-url`, {
-        method: "GET",
-        headers: { authorization: `Bearer ${token}` },
-      });
+      // 1) Prøv server-endepunkt (foretrukket)
+      try {
+        const res = await fetch(`/api/orders/${orderId}/confirmation-url`, {
+          method: "GET",
+          headers: { authorization: `Bearer ${token}` },
+        });
 
-      const payload = await res.json().catch(() => null);
-      if (!res.ok || !payload?.url) {
-        alert(payload?.error ?? "Kunne ikke hente nedlastingslenke.");
+        const payload = await res.json().catch(() => null);
+
+        if (res.ok && payload?.url) {
+          window.open(payload.url, "_blank", "noopener,noreferrer");
+          return;
+        }
+
+        // Fall videre til client-side signed url
+        console.warn("confirmation-url failed:", res.status, payload);
+      } catch (e) {
+        console.warn("confirmation-url exception:", e);
+      }
+
+      // 2) Fallback: lag signed url direkte fra Storage (robust i prod)
+      const { data, error } = await supabase.storage.from(CONFIRM_BUCKET).createSignedUrl(confirmationPath, 600);
+
+      if (error || !data?.signedUrl) {
+        console.error("createSignedUrl failed:", error);
+        alert("Kunne ikke hente nedlastingslenke.");
         return;
       }
 
-      window.open(payload.url, "_blank", "noopener,noreferrer");
+      window.open(data.signedUrl, "_blank", "noopener,noreferrer");
     } finally {
       setDownloadingId(null);
     }
@@ -425,7 +431,7 @@ export default function OrdersPage() {
           Du har ikke tilgang.
         </div>
         <button
-          className="rounded-xl border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-gray-100 hover:bg-gray-800 md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50"
+          className="rounded-xl border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-gray-100 hover:bg-gray-800 md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50 transition-colors"
           onClick={() => router.push("/login")}
         >
           Til innlogging
@@ -441,7 +447,7 @@ export default function OrdersPage() {
         <div className="mx-auto max-w-5xl px-4 md:px-6 py-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <button
-              className="rounded-xl border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-gray-100 hover:bg-gray-800 md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50"
+              className="rounded-xl border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-gray-100 hover:bg-gray-800 md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50 transition-colors"
               onClick={() => router.push("/products")}
             >
               ← Produkter
@@ -464,15 +470,9 @@ export default function OrdersPage() {
         </div>
 
         {/* 🔎 Filterbar */}
-        <div
-          className={cn(
-            "rounded-2xl border p-4 md:p-5",
-            "border-gray-800 bg-gray-900/40 md:border-gray-200 md:bg-white"
-          )}
-        >
+        <div className={cn("rounded-2xl border p-4 md:p-5", "border-gray-800 bg-gray-900/40 md:border-gray-200 md:bg-white")}>
           <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
             <div className="flex flex-col gap-2 md:flex-row md:flex-wrap md:items-end">
-              {/* Kunde dropdown (kun for admin/innkjøper) */}
               {canFilterCustomers ? (
                 <div className="flex flex-col gap-1">
                   <label className="text-xs text-gray-400 md:text-gray-600">Kunde</label>
@@ -489,14 +489,11 @@ export default function OrdersPage() {
                     ))}
                   </select>
                   {customerOptions.length === 0 ? (
-                    <div className="text-[11px] text-gray-500 md:text-gray-500">
-                      (Ingen kunde-felt i data ennå)
-                    </div>
+                    <div className="text-[11px] text-gray-500 md:text-gray-500">(Ingen kunde-felt i data ennå)</div>
                   ) : null}
                 </div>
               ) : null}
 
-              {/* Dato fra/til */}
               <div className="flex flex-col gap-1">
                 <label className="text-xs text-gray-400 md:text-gray-600">Fra dato</label>
                 <input
@@ -517,7 +514,6 @@ export default function OrdersPage() {
                 />
               </div>
 
-              {/* Søk */}
               <div className="flex flex-col gap-1 md:min-w-[320px]">
                 <label className="text-xs text-gray-400 md:text-gray-600">Søk</label>
                 <input
@@ -536,7 +532,7 @@ export default function OrdersPage() {
               </div>
 
               <button
-                className="h-10 rounded-xl border border-gray-700 bg-gray-900 px-3 text-sm text-gray-100 hover:bg-gray-800 md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50"
+                className="h-10 rounded-xl border border-gray-700 bg-gray-900 px-3 text-sm text-gray-100 hover:bg-gray-800 md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50 transition-colors"
                 onClick={() => {
                   setQ("");
                   setFromDate("");
@@ -587,34 +583,23 @@ export default function OrdersPage() {
               return (
                 <div
                   key={o.id}
-                  className={cn(
-                    "rounded-2xl border p-4 md:p-5",
-                    "border-gray-800 bg-gray-900/40 md:border-gray-200 md:bg-white"
-                  )}
+                  className={cn("rounded-2xl border p-4 md:p-5", "border-gray-800 bg-gray-900/40 md:border-gray-200 md:bg-white")}
                 >
                   <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between md:gap-4">
                     <div className="space-y-1">
-                      <div className="text-xs text-gray-300 md:text-gray-500">
-                        Opprettet: {formatDateTime(o.created_at)}
-                      </div>
+                      <div className="text-xs text-gray-300 md:text-gray-500">Opprettet: {formatDateTime(o.created_at)}</div>
 
                       <div className="text-xs text-gray-300 md:text-gray-500">
                         Sist endret:{" "}
                         <span className="font-medium text-gray-100 md:text-gray-900">{formatDateTime(lastTs)}</span>
-                        {o.updated_by_name ? (
-                          <span className="text-gray-400 md:text-gray-500"> · {o.updated_by_name}</span>
-                        ) : null}
+                        {o.updated_by_name ? <span className="text-gray-400 md:text-gray-500"> · {o.updated_by_name}</span> : null}
                       </div>
 
-                      {customerLine ? (
-                        <div className="text-sm text-gray-300 md:text-gray-600">Kunde: {customerLine}</div>
-                      ) : null}
+                      {customerLine ? <div className="text-sm text-gray-300 md:text-gray-600">Kunde: {customerLine}</div> : null}
 
                       <div className="text-base font-semibold text-gray-100 md:text-gray-900">{o.project_name}</div>
 
-                      {o.project_no ? (
-                        <div className="text-sm text-gray-300 md:text-gray-600">Prosjekt nr: {o.project_no}</div>
-                      ) : null}
+                      {o.project_no ? <div className="text-sm text-gray-300 md:text-gray-600">Prosjekt nr: {o.project_no}</div> : null}
                     </div>
 
                     <div className="flex items-start justify-between gap-3 md:flex-col md:items-end md:gap-2">
@@ -669,7 +654,7 @@ export default function OrdersPage() {
 
                   <div className="mt-4 flex flex-wrap items-center gap-2">
                     <button
-                      className="rounded-xl border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-gray-100 hover:bg-gray-800 md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50"
+                      className="rounded-xl border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-gray-100 hover:bg-gray-800 md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50 transition-colors"
                       onClick={() => router.push(`/orders/${o.id}`)}
                     >
                       Åpne ordre
@@ -678,8 +663,12 @@ export default function OrdersPage() {
                     {hasConfirmation ? (
                       <button
                         disabled={busyDownload}
-                        className="rounded-xl bg-white/10 px-3 py-2 text-sm text-gray-100 hover:bg-white/15 disabled:opacity-50 md:bg-black md:text-white md:hover:opacity-90"
-                        onClick={() => openConfirmation(o.id)}
+                        className={cn(
+                          "rounded-xl px-3 py-2 text-sm font-medium disabled:opacity-50 transition-colors",
+                          "bg-white/10 hover:bg-white/15 text-gray-100",
+                          "md:bg-black md:text-white md:hover:bg-black/90"
+                        )}
+                        onClick={() => openConfirmation(o.id, o.confirmation_file_path)}
                       >
                         {busyDownload ? "Henter lenke…" : "Last ned ordrebekreftelse"}
                       </button>
@@ -690,7 +679,7 @@ export default function OrdersPage() {
                     {isAdmin ? (
                       <button
                         disabled={busyDelete}
-                        className="rounded-xl border border-red-700/50 bg-red-950/30 px-3 py-2 text-sm text-red-200 hover:bg-red-950/45 disabled:opacity-50 md:border-red-200 md:bg-white md:text-red-700 md:hover:bg-red-50"
+                        className="rounded-xl border border-red-700/50 bg-red-950/30 px-3 py-2 text-sm text-red-200 hover:bg-red-950/45 disabled:opacity-50 md:border-red-200 md:bg-white md:text-red-700 md:hover:bg-red-50 transition-colors"
                         onClick={() => deleteOrder(o.id)}
                         title="Slett ordre"
                       >

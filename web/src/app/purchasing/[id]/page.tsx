@@ -45,6 +45,17 @@ type OrderMessageRow = {
   body: string;
 };
 
+// ✅ ADDED: Order item rows (same shape as customer side)
+type OrderItemRow = {
+  id: string;
+  order_id: string;
+  product_id: string;
+  product_no: string;
+  name: string;
+  unit_price: number;
+  qty: number;
+};
+
 const STATUSES = [
   "SUBMITTED",
   "IN_REVIEW",
@@ -186,6 +197,20 @@ function humanRole(r: Role) {
  */
 const CONFIRM_BUCKET = "order-confirmations";
 
+// ✅ ADDED: price formatting helpers
+function safeNumber(n: unknown) {
+  const x = typeof n === "number" ? n : Number(n);
+  return Number.isFinite(x) ? x : 0;
+}
+
+function formatNok(value: number) {
+  return new Intl.NumberFormat("nb-NO", {
+    style: "currency",
+    currency: "NOK",
+    maximumFractionDigits: 0,
+  }).format(value);
+}
+
 export default function PurchasingOrderPage() {
   const router = useRouter();
   const params = useParams<{ id: string }>();
@@ -225,6 +250,11 @@ export default function PurchasingOrderPage() {
   const [msgErr, setMsgErr] = useState<string | null>(null);
   const [msgText, setMsgText] = useState("");
   const msgEndRef = useRef<HTMLDivElement | null>(null);
+
+  // ✅ ADDED: Order items state
+  const [items, setItems] = useState<OrderItemRow[]>([]);
+  const [itemsLoading, setItemsLoading] = useState(false);
+  const [itemsErr, setItemsErr] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -375,6 +405,57 @@ export default function PurchasingOrderPage() {
       alive = false;
     };
   }, [id, router, supabase]);
+
+  // ✅ ADDED: Load order items (best-effort)
+  useEffect(() => {
+    let alive = true;
+
+    async function loadItems() {
+      setItemsErr(null);
+      setItemsLoading(true);
+
+      try {
+        const res = await supabase
+          .from("order_items")
+          .select("id, order_id, product_id, product_no, name, unit_price, qty")
+          .eq("order_id", id)
+          .order("product_no", { ascending: true });
+
+        if (!alive) return;
+
+        if (res.error) {
+          if (looksLikeMissingTable(res.error, "order_items")) {
+            setItems([]);
+            setItemsErr(
+              'Ordrelinjer er ikke aktivert ennå (mangler tabell "order_items"). Si fra, så legger vi SQL-migrering.'
+            );
+            return;
+          }
+          setItems([]);
+          setItemsErr(res.error.message);
+          return;
+        }
+
+        setItems((res.data ?? []) as OrderItemRow[]);
+      } finally {
+        if (alive) setItemsLoading(false);
+      }
+    }
+
+    if (!id) return;
+
+    loadItems();
+
+    return () => {
+      alive = false;
+    };
+  }, [id, supabase]);
+
+  const itemsTotal = useMemo(() => {
+    return (items ?? []).reduce((sum, it) => {
+      return sum + safeNumber(it.qty) * safeNumber(it.unit_price);
+    }, 0);
+  }, [items]);
 
   // Signed URL for confirmation download (if private bucket)
   useEffect(() => {
@@ -786,6 +867,90 @@ export default function PurchasingOrderPage() {
             ) : null}
           </div>
 
+          {/* ✅ ADDED: Order items + total + per-product button */}
+          <div
+            className={cn(
+              "rounded-2xl border p-4 space-y-3",
+              "border-gray-800 bg-gray-950/40 md:border-gray-200 md:bg-gray-50"
+            )}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="text-sm font-semibold text-gray-100 md:text-gray-900">
+                Ordrelinjer
+              </div>
+              <div className="text-xs text-gray-300 md:text-gray-600">
+                Totalt:{" "}
+                <span className="font-semibold text-gray-100 md:text-gray-900">
+                  {formatNok(itemsTotal)}
+                </span>
+              </div>
+            </div>
+
+            {itemsErr ? (
+              <div className="rounded-xl border border-amber-700/40 bg-amber-950/30 px-4 py-3 text-sm text-amber-200 md:border-amber-200 md:bg-white md:text-amber-800">
+                {itemsErr}
+              </div>
+            ) : null}
+
+            {itemsLoading ? (
+              <div className="text-sm text-gray-400 md:text-gray-600">Laster ordrelinjer…</div>
+            ) : items.length === 0 ? (
+              <div className="text-sm text-gray-400 md:text-gray-600">
+                Ingen ordrelinjer funnet.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {items.map((it) => {
+                  const lineTotal = safeNumber(it.qty) * safeNumber(it.unit_price);
+                  return (
+                    <div
+                      key={it.id}
+                      className={cn(
+                        "rounded-xl border px-3 py-2",
+                        "border-gray-800 bg-gray-900/30 md:border-gray-200 md:bg-white"
+                      )}
+                    >
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="text-xs text-gray-400 md:text-gray-500 font-mono">
+                            {it.product_no}
+                          </div>
+                          <div className="text-sm text-gray-100 md:text-gray-900 truncate">
+                            {it.name}
+                          </div>
+                          <div className="mt-1 text-xs text-gray-300 md:text-gray-600">
+                            Antall: <span className="font-medium">{it.qty}</span> · Enhetspris:{" "}
+                            <span className="font-medium">{formatNok(safeNumber(it.unit_price))}</span>
+                          </div>
+                        </div>
+
+                        <div className="shrink-0 text-right space-y-2">
+                          <div className="text-sm font-semibold text-gray-100 md:text-gray-900">
+                            {formatNok(lineTotal)}
+                          </div>
+
+                          <button
+                            className={cn(
+                              "rounded-lg border px-3 py-2 text-sm",
+                              "border-gray-700 hover:bg-gray-900 md:border-gray-300 md:hover:bg-gray-50"
+                            )}
+                            onClick={() => {
+                              // NOTE: adjust route if customer side uses a different product route
+                              router.push(`/products/${it.product_id}`);
+                            }}
+                            title="Åpne produkt"
+                          >
+                            Åpne produkt
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
           <div className="grid gap-3">
             <label className="text-sm">
               Status
@@ -883,7 +1048,8 @@ export default function PurchasingOrderPage() {
               </div>
 
               <div className="text-[11px] text-gray-500 md:text-gray-500">
-                Lagrer i Supabase Storage-bucket: <span className="font-mono">{CONFIRM_BUCKET}</span>
+                Lagrer i Supabase Storage-bucket:{" "}
+                <span className="font-mono">{CONFIRM_BUCKET}</span>
               </div>
             </div>
 
@@ -902,17 +1068,17 @@ export default function PurchasingOrderPage() {
             </label>
 
             <button
-  disabled={busy}
-  onClick={saveChanges}
-  className={cn(
-    "rounded-lg px-4 py-2 text-sm font-medium disabled:opacity-50",
-    "transition-colors",
-    "bg-white/10 hover:bg-white/15 text-gray-100",
-    "md:bg-black md:text-white md:hover:bg-black/90"
-  )}
->
-  {busy ? "Lagrer…" : "Lagre endringer"}
-</button>
+              disabled={busy}
+              onClick={saveChanges}
+              className={cn(
+                "rounded-lg px-4 py-2 text-sm font-medium disabled:opacity-50",
+                "transition-colors",
+                "bg-white/10 hover:bg-white/15 text-gray-100",
+                "md:bg-black md:text-white md:hover:bg-black/90"
+              )}
+            >
+              {busy ? "Lagrer…" : "Lagre endringer"}
+            </button>
           </div>
         </div>
 
@@ -925,9 +1091,7 @@ export default function PurchasingOrderPage() {
         >
           <div className="flex items-center justify-between gap-3">
             <div className="text-lg font-semibold">Internchat</div>
-            <div className="text-xs text-gray-400 md:text-gray-500">
-              Chat gjelder kun denne ordren
-            </div>
+            <div className="text-xs text-gray-400 md:text-gray-500">Chat gjelder kun denne ordren</div>
           </div>
 
           {!chatEnabled ? (
@@ -1023,7 +1187,8 @@ export default function PurchasingOrderPage() {
           </div>
 
           <div className="text-[11px] text-gray-500 md:text-gray-500">
-            NB: For at chat skal fungere må databasen ha tabell <span className="font-mono">order_messages</span>.
+            NB: For at chat skal fungere må databasen ha tabell{" "}
+            <span className="font-mono">order_messages</span>.
           </div>
         </div>
 
