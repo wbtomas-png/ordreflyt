@@ -99,7 +99,13 @@ function looksLikeMissingColumn(err: any, col: string) {
 
 function looksLikeMissingTable(err: any, table: string) {
   const msg = String(err?.message ?? "").toLowerCase();
-  return msg.includes("does not exist") && msg.includes(table.toLowerCase());
+  const t = table.toLowerCase();
+  return (
+    (msg.includes("does not exist") ||
+      msg.includes("could not find the table") ||
+      msg.includes("schema cache")) &&
+    msg.includes(t)
+  );
 }
 
 function isOrderRow(x: unknown): x is OrderRow {
@@ -896,15 +902,17 @@ export default function PurchasingOrderPage() {
             </label>
 
             <button
-              disabled={busy}
-              onClick={saveChanges}
-              className={cn(
-                "rounded-lg px-4 py-2 text-sm font-medium disabled:opacity-50",
-                "bg-white/10 hover:bg-white/15 md:bg-black md:text-white md:hover:opacity-90"
-              )}
-            >
-              {busy ? "Lagrer…" : "Lagre endringer"}
-            </button>
+  disabled={busy}
+  onClick={saveChanges}
+  className={cn(
+    "rounded-lg px-4 py-2 text-sm font-medium disabled:opacity-50",
+    "transition-colors",
+    "bg-white/10 hover:bg-white/15 text-gray-100",
+    "md:bg-black md:text-white md:hover:bg-black/90"
+  )}
+>
+  {busy ? "Lagrer…" : "Lagre endringer"}
+</button>
           </div>
         </div>
 
