@@ -32,6 +32,7 @@ function ssKeys(prefix?: string) {
 }
 
 function logAuthState(where: string) {
+  // Dev-only logging (not shown to users)
   // eslint-disable-next-line no-console
   console.groupCollapsed(`[auth][${where}] state`);
   try {
@@ -81,6 +82,7 @@ export default function LoginClient() {
   }, []);
 
   useEffect(() => {
+    // Keep logs for troubleshooting, but don't show debug UI to end users.
     logAuthState("login:mount");
 
     try {
@@ -111,20 +113,13 @@ export default function LoginClient() {
 
     try {
       logAuthState(`login:before:${provider}`);
-
       // eslint-disable-next-line no-console
       console.log("[login] redirectTo:", redirectTo);
-
-      const lsBefore = lsKeys("supabase");
-      const ssBefore = ssKeys("supabase");
 
       const { data, error } = await supabase.auth.signInWithOAuth({
         provider,
         options: {
-          // ✅ Vi vil alltid tilbake til vår callback (som håndterer PKCE code → session)
           redirectTo,
-
-          // (valgfritt) gjør det litt enklere å velge riktig konto i Microsoft
           ...(provider === "azure" ? { queryParams: { prompt: "select_account" } } : {}),
         },
       });
@@ -134,22 +129,6 @@ export default function LoginClient() {
       // eslint-disable-next-line no-console
       console.log("[login] signInWithOAuth error:", error);
 
-      const lsAfter = lsKeys("supabase");
-      const ssAfter = ssKeys("supabase");
-
-      // eslint-disable-next-line no-console
-      console.groupCollapsed("[login] storage diff (supabase)");
-      // eslint-disable-next-line no-console
-      console.log("localStorage before:", lsBefore);
-      // eslint-disable-next-line no-console
-      console.log("localStorage after :", lsAfter);
-      // eslint-disable-next-line no-console
-      console.log("sessionStorage before:", ssBefore);
-      // eslint-disable-next-line no-console
-      console.log("sessionStorage after :", ssAfter);
-      // eslint-disable-next-line no-console
-      console.groupEnd();
-
       const sess = await supabase.auth.getSession();
       // eslint-disable-next-line no-console
       console.log(
@@ -158,13 +137,13 @@ export default function LoginClient() {
       );
 
       if (error) {
-        alert(error.message);
+        alert("Innlogging feilet. Prøv igjen, eller kontakt administrator.");
         setBusy(false);
         setBusyProvider(null);
         return;
       }
 
-      // ✅ Viktig: tving navigasjon hvis supabase-js ikke gjør redirect automatisk i ditt miljø.
+      // Force navigation if supabase-js doesn't redirect automatically
       if (data?.url) {
         window.location.assign(data.url);
         return;
@@ -177,48 +156,31 @@ export default function LoginClient() {
     } catch (e: any) {
       // eslint-disable-next-line no-console
       console.error("[login] signIn exception:", e);
-      alert(e?.message ? String(e.message) : "Ukjent feil ved innlogging.");
+      alert("Innlogging feilet. Prøv igjen, eller kontakt administrator.");
       setBusy(false);
       setBusyProvider(null);
     }
   }
 
+  // User-friendly error message if callback reported a stop
+  const showStopped = Boolean(cb || detail);
+
   return (
     <div className="min-h-screen bg-white flex items-center justify-center px-6">
       <div className="w-full max-w-md space-y-8">
         <div className="text-center space-y-3">
-          <div className="text-3xl font-semibold tracking-tight">OrderFlow</div>
+          <div className="text-3xl font-semibold tracking-tight">Heras Ordreflyt</div>
           <p className="text-sm text-gray-600">Produktkatalog og bestillingssystem for intern bruk.</p>
         </div>
 
-        {(cb || detail) && (
+        {showStopped ? (
           <div className="rounded-xl border bg-red-50 p-4 text-sm text-red-800">
-            <div className="font-semibold">Innlogging stoppet</div>
-            {cb ? (
-              <div className="mt-1">
-                <span className="font-medium">Steg:</span> {cb}
-              </div>
-            ) : null}
-            {detail ? (
-              <div className="mt-1 break-words">
-                <span className="font-medium">Detaljer:</span> {detail}
-              </div>
-            ) : null}
-
-            <div className="mt-3 text-xs text-red-700 space-y-1">
-              <div>
-                <span className="font-medium">Origin:</span>{" "}
-                {typeof window !== "undefined" ? window.location.origin : ""}
-              </div>
-              <div className="break-words">
-                <span className="font-medium">RedirectTo:</span> {redirectTo}
-              </div>
-              <div className="text-[11px] leading-4 text-red-700">
-                Sjekk Console for full logg (origin, redirect, storage keys, hash/search).
-              </div>
+            <div className="font-semibold">Innlogging mislyktes</div>
+            <div className="mt-1 text-red-700">
+              Prøv igjen. Hvis problemet fortsetter, kontakt administrator.
             </div>
           </div>
-        )}
+        ) : null}
 
         <div className="rounded-2xl border bg-white p-8 shadow-sm space-y-4">
           <div className="space-y-2 text-center">
@@ -240,13 +202,11 @@ export default function LoginClient() {
           >
             {busy && busyProvider === "azure" ? "Sender deg videre…" : "Logg inn med Microsoft"}
           </button>
-
-          <div className="pt-2 text-xs text-gray-500">
-            Debug: åpne DevTools Console. Vi logger origin, redirectTo, search/hash, storage keys og Supabase-respons.
-          </div>
         </div>
 
-        <div className="text-center text-xs text-gray-400">© {new Date().getFullYear()} OrderFlow</div>
+        <div className="text-center text-xs text-gray-400">
+          © {new Date().getFullYear()} Heras Ordreflyt
+        </div>
       </div>
     </div>
   );
