@@ -169,6 +169,14 @@ function humanRole(r: Role | null | undefined) {
   return "Kunde";
 }
 
+// Viktig for catch-all route: encode hver del, ikke hele stien
+function localFileUrl(relativePath: string) {
+  return `/api/local-file/${relativePath
+    .split("/")
+    .map(encodeURIComponent)
+    .join("/")}`;
+}
+
 export default function OrderDetailsPage() {
   const router = useRouter();
   const params = useParams<{ id: string }>();
@@ -401,36 +409,14 @@ export default function OrderDetailsPage() {
     return items.reduce((sum, x) => sum + safeNumber(x.unit_price) * safeNumber(x.qty), 0);
   }, [items]);
 
+  // ✅ Nedlasting: samme mønster som orders/page.tsx (via /api/local-file/<path>)
   async function openConfirmation() {
-    if (!order?.confirmation_file_path || !orderId) return;
+    const path = order?.confirmation_file_path;
+    if (!path) return;
 
     setDownloading(true);
     try {
-      const { data: sessionRes } = await supabase.auth.getSession();
-      let token = sessionRes.session?.access_token ?? null;
-
-      if (!token) {
-        const { data: refreshed } = await supabase.auth.refreshSession();
-        token = refreshed.session?.access_token ?? null;
-      }
-
-      if (!token) {
-        alert("Du er ikke innlogget.");
-        router.replace("/login");
-        return;
-      }
-
-      const res = await fetch(`/api/orders/${orderId}/confirmation-url`, {
-        method: "GET",
-        headers: { authorization: `Bearer ${token}` },
-      });
-
-      if (!res.ok) {
-        alert("Kunne ikke hente nedlastingslenke.");
-        return;
-      }
-
-      const { url } = (await res.json()) as { url: string };
+      const url = localFileUrl(path);
       window.open(url, "_blank", "noopener,noreferrer");
     } finally {
       setDownloading(false);
@@ -661,10 +647,14 @@ export default function OrderDetailsPage() {
               {order.confirmation_file_path ? (
                 <button
                   disabled={downloading}
-                  className="rounded-xl bg-white/10 px-4 py-2 text-sm text-gray-100 hover:bg-white/15 disabled:opacity-50 md:bg-black md:text-white md:hover:opacity-90"
+                  className={cn(
+                    "rounded-xl px-4 py-2 text-sm text-gray-100 disabled:opacity-50",
+                    "bg-white/10 hover:bg-white/15",
+                    "md:bg-black md:text-white md:hover:bg-black/90" // ✅ ikke bruk opacity-hover (kan “forsvinne” visuelt)
+                  )}
                   onClick={openConfirmation}
                 >
-                  {downloading ? "Henter lenke…" : "Last ned ordrebekreftelse"}
+                  {downloading ? "Åpner…" : "Last ned ordrebekreftelse"}
                 </button>
               ) : (
                 <div className="rounded-xl border border-gray-800 bg-gray-950/40 px-4 py-2 text-sm text-gray-300 md:border-gray-200 md:bg-white md:text-gray-600">
@@ -690,9 +680,7 @@ export default function OrderDetailsPage() {
                 </button>
               ) : null}
 
-              {toast ? (
-                <div className="text-xs text-emerald-300 md:text-green-700">{toast}</div>
-              ) : null}
+              {toast ? <div className="text-xs text-emerald-300 md:text-green-700">{toast}</div> : null}
             </div>
           </div>
         </div>
@@ -950,7 +938,8 @@ export default function OrderDetailsPage() {
               disabled={!chatEnabled || !msgText.trim()}
               className={cn(
                 "shrink-0 rounded-xl px-4 py-2 text-sm font-medium disabled:opacity-50",
-                "bg-white/10 hover:bg-white/15 md:bg-black md:text-white md:hover:opacity-90"
+                "bg-white/10 hover:bg-white/15",
+                "md:bg-black md:text-white md:hover:bg-black/90" // ✅ ikke bruk opacity-hover
               )}
               title="Send"
             >
