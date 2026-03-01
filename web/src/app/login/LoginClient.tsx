@@ -75,11 +75,10 @@ export default function LoginClient() {
   const cb = sp.get("cb");
   const detail = sp.get("detail");
 
-  // OBS:
-  // Ikke bruk redirectTo her for OAuth-providerne når du får redirect_uri-mismatch.
-  // La Supabase bruke sin egen callback: https://<project>.supabase.co/auth/v1/callback
-  // og returnere deg til riktig site basert på Site URL / Redirect URLs i Supabase Auth settings.
-  const origin = useMemo(() => (typeof window === "undefined" ? "" : window.location.origin), []);
+  const redirectTo = useMemo(() => {
+    if (typeof window === "undefined") return "/auth/callback";
+    return `${window.location.origin}/auth/callback`;
+  }, []);
 
   useEffect(() => {
     logAuthState("login:mount");
@@ -113,17 +112,20 @@ export default function LoginClient() {
     try {
       logAuthState(`login:before:${provider}`);
 
-      // snapshot storage keys before
+      // eslint-disable-next-line no-console
+      console.log("[login] redirectTo:", redirectTo);
+
       const lsBefore = lsKeys("supabase");
       const ssBefore = ssKeys("supabase");
 
-      // ✅ Viktig endring:
-      // Ikke sett options.redirectTo. Det er dette som ofte gjør at redirect_uri blir feil hos Microsoft.
       const { data, error } = await supabase.auth.signInWithOAuth({
         provider,
         options: {
-          // For jobbkontoer kan disse hjelpe litt på consent/debug, men er ikke påkrevd:
-          // queryParams: { prompt: "select_account" },
+          // ✅ Vi vil alltid tilbake til vår callback (som håndterer PKCE code → session)
+          redirectTo,
+
+          // (valgfritt) gjør det litt enklere å velge riktig konto i Microsoft
+          ...(provider === "azure" ? { queryParams: { prompt: "select_account" } } : {}),
         },
       });
 
@@ -132,7 +134,6 @@ export default function LoginClient() {
       // eslint-disable-next-line no-console
       console.log("[login] signInWithOAuth error:", error);
 
-      // snapshot storage keys after
       const lsAfter = lsKeys("supabase");
       const ssAfter = ssKeys("supabase");
 
@@ -163,9 +164,16 @@ export default function LoginClient() {
         return;
       }
 
-      // På suksess vil nettleseren redirecte bort. Hvis ikke, blir vi stående her.
+      // ✅ Viktig: tving navigasjon hvis supabase-js ikke gjør redirect automatisk i ditt miljø.
+      if (data?.url) {
+        window.location.assign(data.url);
+        return;
+      }
+
       // eslint-disable-next-line no-console
-      console.log("[login] OAuth initiated. Browser should redirect now.");
+      console.warn("[login] No data.url returned. OAuth should have redirected automatically.");
+      setBusy(false);
+      setBusyProvider(null);
     } catch (e: any) {
       // eslint-disable-next-line no-console
       console.error("[login] signIn exception:", e);
@@ -199,10 +207,14 @@ export default function LoginClient() {
 
             <div className="mt-3 text-xs text-red-700 space-y-1">
               <div>
-                <span className="font-medium">Origin:</span> {origin}
+                <span className="font-medium">Origin:</span>{" "}
+                {typeof window !== "undefined" ? window.location.origin : ""}
+              </div>
+              <div className="break-words">
+                <span className="font-medium">RedirectTo:</span> {redirectTo}
               </div>
               <div className="text-[11px] leading-4 text-red-700">
-                Sjekk Console for full logg (origin, search/hash, storage keys og Supabase-respons).
+                Sjekk Console for full logg (origin, redirect, storage keys, hash/search).
               </div>
             </div>
           </div>
@@ -230,7 +242,7 @@ export default function LoginClient() {
           </button>
 
           <div className="pt-2 text-xs text-gray-500">
-            Debug: åpne DevTools Console. Vi logger origin, search/hash, storage keys og Supabase-respons.
+            Debug: åpne DevTools Console. Vi logger origin, redirectTo, search/hash, storage keys og Supabase-respons.
           </div>
         </div>
 
