@@ -53,7 +53,6 @@ function logAuthState(where: string) {
     console.log("localStorage keys:", lsKeys());
     // eslint-disable-next-line no-console
     console.log("sessionStorage keys:", ssKeys());
-    // Useful to see whether Supabase wrote PKCE verifier-like entries
     // eslint-disable-next-line no-console
     console.log("localStorage keys (supabase):", lsKeys("supabase"));
     // eslint-disable-next-line no-console
@@ -66,25 +65,25 @@ function logAuthState(where: string) {
   console.groupEnd();
 }
 
+type Provider = "google" | "azure";
+
 export default function LoginClient() {
   const [busy, setBusy] = useState(false);
-  const [busyProvider, setBusyProvider] = useState<"google" | "azure" | null>(null);
+  const [busyProvider, setBusyProvider] = useState<Provider | null>(null);
 
   const sp = useSearchParams();
   const cb = sp.get("cb");
   const detail = sp.get("detail");
 
-  const redirectTo = useMemo(() => {
-    // IMPORTANT: must be same-origin as where login is initiated (PKCE verifier stored per origin)
-    if (typeof window === "undefined") return "/auth/callback";
-    return `${window.location.origin}/auth/callback`;
-  }, []);
+  // OBS:
+  // Ikke bruk redirectTo her for OAuth-providerne når du får redirect_uri-mismatch.
+  // La Supabase bruke sin egen callback: https://<project>.supabase.co/auth/v1/callback
+  // og returnere deg til riktig site basert på Site URL / Redirect URLs i Supabase Auth settings.
+  const origin = useMemo(() => (typeof window === "undefined" ? "" : window.location.origin), []);
 
   useEffect(() => {
-    // Page-load diagnostics
     logAuthState("login:mount");
 
-    // Detect common mismatch early (prod domain vs preview domain)
     try {
       const host = window.location.hostname;
       const isVercelPreview = host.includes("-") && host.endsWith(".vercel.app");
@@ -93,19 +92,19 @@ export default function LoginClient() {
       console.log("[login] host:", host, { isVercelPreview, isProdVercel });
     } catch {}
 
-    // Log cb/detail from query for correlation
     // eslint-disable-next-line no-console
     console.log("[login] cb/detail:", { cb, detail });
 
-    // If a hash token is present, it means you're being redirected back with implicit tokens (not PKCE code).
-    // We log it, not consume it here (callback should handle session).
     // eslint-disable-next-line no-console
     if (typeof window !== "undefined" && window.location.hash) {
-      console.log("[login] hash present (possible implicit flow):", window.location.hash.slice(0, 200) + "…");
+      console.log(
+        "[login] hash present (possible implicit flow):",
+        window.location.hash.slice(0, 200) + "…"
+      );
     }
   }, [cb, detail]);
 
-  async function signIn(provider: "google" | "azure") {
+  async function signIn(provider: Provider) {
     setBusy(true);
     setBusyProvider(provider);
 
@@ -114,19 +113,17 @@ export default function LoginClient() {
     try {
       logAuthState(`login:before:${provider}`);
 
-      // eslint-disable-next-line no-console
-      console.log("[login] redirectTo:", redirectTo);
-
       // snapshot storage keys before
       const lsBefore = lsKeys("supabase");
       const ssBefore = ssKeys("supabase");
 
+      // ✅ Viktig endring:
+      // Ikke sett options.redirectTo. Det er dette som ofte gjør at redirect_uri blir feil hos Microsoft.
       const { data, error } = await supabase.auth.signInWithOAuth({
-        provider: provider === "google" ? "google" : "azure",
+        provider,
         options: {
-          redirectTo,
-          // These can help for debugging; leave as defaults otherwise
-          // queryParams: { prompt: "consent" },
+          // For jobbkontoer kan disse hjelpe litt på consent/debug, men er ikke påkrevd:
+          // queryParams: { prompt: "select_account" },
         },
       });
 
@@ -152,10 +149,12 @@ export default function LoginClient() {
       // eslint-disable-next-line no-console
       console.groupEnd();
 
-      // Also log current session immediately (often null before redirect; still useful)
       const sess = await supabase.auth.getSession();
       // eslint-disable-next-line no-console
-      console.log("[login] getSession after signInWithOAuth:", safeJson(sess.data?.session ? { hasSession: true } : { hasSession: false }));
+      console.log(
+        "[login] getSession after signInWithOAuth:",
+        safeJson(sess.data?.session ? { hasSession: true } : { hasSession: false })
+      );
 
       if (error) {
         alert(error.message);
@@ -164,9 +163,7 @@ export default function LoginClient() {
         return;
       }
 
-      // IMPORTANT:
-      // On success, Supabase will redirect the browser away.
-      // If it doesn't, something prevented navigation (popup blocker etc.)
+      // På suksess vil nettleseren redirecte bort. Hvis ikke, blir vi stående her.
       // eslint-disable-next-line no-console
       console.log("[login] OAuth initiated. Browser should redirect now.");
     } catch (e: any) {
@@ -178,25 +175,14 @@ export default function LoginClient() {
     }
   }
 
-  async function signInGoogle() {
-    await signIn("google");
-  }
-
-  async function signInMicrosoft() {
-    await signIn("azure");
-  }
-
   return (
     <div className="min-h-screen bg-white flex items-center justify-center px-6">
       <div className="w-full max-w-md space-y-8">
         <div className="text-center space-y-3">
           <div className="text-3xl font-semibold tracking-tight">OrderFlow</div>
-          <p className="text-sm text-gray-600">
-            Produktkatalog og bestillingssystem for intern bruk.
-          </p>
+          <p className="text-sm text-gray-600">Produktkatalog og bestillingssystem for intern bruk.</p>
         </div>
 
-        {/* DEBUG/FEILVISNING */}
         {(cb || detail) && (
           <div className="rounded-xl border bg-red-50 p-4 text-sm text-red-800">
             <div className="font-semibold">Innlogging stoppet</div>
@@ -213,14 +199,10 @@ export default function LoginClient() {
 
             <div className="mt-3 text-xs text-red-700 space-y-1">
               <div>
-                <span className="font-medium">Origin:</span>{" "}
-                {typeof window !== "undefined" ? window.location.origin : ""}
-              </div>
-              <div className="break-words">
-                <span className="font-medium">RedirectTo:</span> {redirectTo}
+                <span className="font-medium">Origin:</span> {origin}
               </div>
               <div className="text-[11px] leading-4 text-red-700">
-                Sjekk Console for full logg (origin, redirect, storage keys, hash/search).
+                Sjekk Console for full logg (origin, search/hash, storage keys og Supabase-respons).
               </div>
             </div>
           </div>
@@ -233,7 +215,7 @@ export default function LoginClient() {
 
           <button
             disabled={busy}
-            onClick={signInGoogle}
+            onClick={() => signIn("google")}
             className="w-full rounded-xl border border-black bg-black px-4 py-3 text-sm font-medium text-white transition hover:opacity-90 disabled:opacity-50"
           >
             {busy && busyProvider === "google" ? "Sender deg videre…" : "Logg inn med Google"}
@@ -241,21 +223,18 @@ export default function LoginClient() {
 
           <button
             disabled={busy}
-            onClick={signInMicrosoft}
+            onClick={() => signIn("azure")}
             className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm font-medium text-black transition hover:bg-gray-50 disabled:opacity-50"
           >
             {busy && busyProvider === "azure" ? "Sender deg videre…" : "Logg inn med Microsoft"}
           </button>
 
-          {/* Always-on debug hint */}
           <div className="pt-2 text-xs text-gray-500">
-            Debug: åpne DevTools Console. Vi logger origin, redirectTo, search/hash, storage keys og Supabase-respons.
+            Debug: åpne DevTools Console. Vi logger origin, search/hash, storage keys og Supabase-respons.
           </div>
         </div>
 
-        <div className="text-center text-xs text-gray-400">
-          © {new Date().getFullYear()} OrderFlow
-        </div>
+        <div className="text-center text-xs text-gray-400">© {new Date().getFullYear()} OrderFlow</div>
       </div>
     </div>
   );
