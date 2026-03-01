@@ -156,10 +156,44 @@ function isoToNorDate(iso: string | null | undefined): string {
   }
 }
 
+/**
+ * ✅ ADDED: Formats ETA input so mobile "numeric" keyboards work.
+ * - User can type 05032026 and it becomes 05.03.2026 automatically.
+ * - We still allow dots if user has them.
+ */
+function formatEtaInput(raw: string): string {
+  const digits = String(raw ?? "").replace(/\D/g, "").slice(0, 8);
+  if (digits.length <= 2) return digits;
+  if (digits.length <= 4) return `${digits.slice(0, 2)}.${digits.slice(2)}`;
+  return `${digits.slice(0, 2)}.${digits.slice(2, 4)}.${digits.slice(4)}`;
+}
+
 /** Parses DD.MM.YYYY -> YYYY-MM-DD. Returns null if empty. Throws on invalid */
 function norDateToIso(input: string): string | null {
   const raw = String(input ?? "").trim();
   if (!raw) return null;
+
+  // ✅ ADDED: accept 8 digits (DDMMYYYY) as well
+  const onlyDigits = raw.replace(/\D/g, "");
+  if (/^\d{8}$/.test(onlyDigits)) {
+    const dd = Number(onlyDigits.slice(0, 2));
+    const mm = Number(onlyDigits.slice(2, 4));
+    const yyyy = Number(onlyDigits.slice(4, 8));
+
+    if (yyyy < 1900 || yyyy > 2100) throw new Error("Ugyldig årstall.");
+    if (mm < 1 || mm > 12) throw new Error("Ugyldig måned.");
+    if (dd < 1 || dd > 31) throw new Error("Ugyldig dag.");
+
+    const d = new Date(Date.UTC(yyyy, mm - 1, dd));
+    const ok =
+      d.getUTCFullYear() === yyyy && d.getUTCMonth() === mm - 1 && d.getUTCDate() === dd;
+    if (!ok) throw new Error("Datoen finnes ikke.");
+
+    return `${String(yyyy).padStart(4, "0")}-${String(mm).padStart(2, "0")}-${String(dd).padStart(
+      2,
+      "0"
+    )}`;
+  }
 
   const m = raw.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
   if (!m) throw new Error("Ugyldig dato. Bruk format DD.MM.YYYY (f.eks. 05.03.2026).");
@@ -503,7 +537,7 @@ export default function PurchasingOrderPage() {
 
       let etaIso: string | null = null;
       try {
-        etaIso = norDateToIso(etaNor);
+        etaIso = norDateToIso(formatEtaInput(etaNor));
       } catch (e: any) {
         setErr(String(e?.message ?? "Ugyldig ETA-dato."));
         return;
@@ -995,9 +1029,11 @@ export default function PurchasingOrderPage() {
                   "md:border-gray-300 md:bg-white md:text-gray-900 md:placeholder:text-gray-400"
                 )}
                 value={etaNor}
-                onChange={(e) => setEtaNor(e.target.value)}
+                onChange={(e) => setEtaNor(formatEtaInput(e.target.value))}
+                onBlur={() => setEtaNor(formatEtaInput(etaNor))}
                 placeholder="05.03.2026"
                 inputMode="numeric"
+                autoComplete="off"
               />
             </label>
 
@@ -1202,4 +1238,4 @@ export default function PurchasingOrderPage() {
       </div>
     </div>
   );
-}
+}   
