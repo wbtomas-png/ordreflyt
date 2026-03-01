@@ -867,6 +867,21 @@ export default function PurchasingOrderPage() {
             ) : null}
           </div>
 
+          {/* ✅ ADDED: Customer comment visible on purchasing page (same as orders/[id]) */}
+          {order.comment ? (
+            <section
+              className={cn(
+                "rounded-2xl border p-4 md:p-5 space-y-2",
+                "border-gray-800 bg-gray-950/40 md:border-gray-200 md:bg-gray-50"
+              )}
+            >
+              <h2 className="font-semibold text-gray-100 md:text-gray-900">Kommentar fra kunde</h2>
+              <p className="text-sm text-gray-200 md:text-gray-800 whitespace-pre-line">
+                {order.comment}
+              </p>
+            </section>
+          ) : null}
+
           {/* ✅ ADDED: Order items + total + per-product button */}
           <div
             className={cn(
@@ -1053,19 +1068,8 @@ export default function PurchasingOrderPage() {
               </div>
             </div>
 
-            <label className="text-sm">
-              Innkjøpernotat (internt)
-              <textarea
-                className={cn(
-                  "mt-1 w-full rounded-xl border px-3 py-2 text-sm outline-none",
-                  "border-gray-700 bg-gray-950 text-gray-100 placeholder:text-gray-500 focus:border-gray-500",
-                  "md:border-gray-300 md:bg-white md:text-gray-900"
-                )}
-                rows={3}
-                value={note}
-                onChange={(e) => setNote(e.target.value)}
-              />
-            </label>
+            {/* ✅ REMOVED: Innkjøpernotat (internt) — replaced by chat */}
+            {/* NOTE: We keep state/DB field intact (purchaser_note), but hide the UI input as requested. */}
 
             <button
               disabled={busy}
