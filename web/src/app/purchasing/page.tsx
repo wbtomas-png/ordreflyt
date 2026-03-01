@@ -126,6 +126,20 @@ function looksLikeMissingColumn(err: any, col: string) {
   return msg.includes("does not exist") && msg.includes(col.toLowerCase());
 }
 
+function userErrorMessage(err: any) {
+  const msg = String(err?.message ?? "");
+  // Ikke lek “database support” med sluttbruker
+  if (!msg) return "Noe gikk galt. Prøv igjen.";
+
+  // Vanlige Supabase/DB-feil -> generisk
+  if (msg.toLowerCase().includes("jwt")) return "Du er logget ut. Logg inn på nytt.";
+  if (msg.toLowerCase().includes("permission")) return "Du har ikke tilgang til dette.";
+  if (msg.toLowerCase().includes("row-level security")) return "Du har ikke tilgang til dette.";
+  if (msg.toLowerCase().includes("does not exist")) return "Systemet mangler en nødvendig oppdatering.";
+
+  return "Noe gikk galt. Prøv igjen.";
+}
+
 function withinDateRange(createdAtIso: string, fromIso: string, toIso: string) {
   const d = safeDateOnly(createdAtIso);
   if (!d) return true;
@@ -622,9 +636,7 @@ export default function PurchasingIndexPage() {
             </div>
           </div>
 
-          <div className="mt-2 text-xs text-gray-400 md:text-gray-500">
-            Tips: Hvis totalpris er 0 på alt, mangler enten <code>order_items</code> eller relationship/query-tilgang.
-          </div>
+
         </div>
 
         {/* List */}
@@ -732,10 +744,7 @@ export default function PurchasingIndexPage() {
           </div>
         )}
 
-        <div className="text-xs text-gray-400 md:text-gray-500">
-          Hvis du fortsatt “ikke ser alle ordrer”: da er det nesten alltid Supabase RLS som begrenser SELECT for admin/innkjøper.
-          Da må vi oppdatere policies på <code>orders</code> (og <code>order_items</code>).
-        </div>
+       
       </div>
     </div>
   );
