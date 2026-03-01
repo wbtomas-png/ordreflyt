@@ -489,14 +489,14 @@ export default function PurchasingIndexPage() {
 
           <div className="flex items-center gap-2">
             <button
-              className={cn(
-                "rounded-lg border px-3 py-2 text-sm",
-                "border-gray-700 hover:bg-gray-900 md:border-gray-300 md:hover:bg-white"
-              )}
-              onClick={() => router.push("/orders")}
-            >
-              ← Mine ordre
-            </button>
+  className={cn(
+    "rounded-lg border px-3 py-2 text-sm",
+    "border-gray-700 hover:bg-gray-900 md:border-gray-300 md:hover:bg-white"
+  )}
+  onClick={() => router.push("/products")}
+>
+  ← Produkter
+</button>
 
             <button
               className={cn(

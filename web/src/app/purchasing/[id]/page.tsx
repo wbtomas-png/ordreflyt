@@ -1,7 +1,7 @@
-// file: src/app/purchasing/[id]/page.tsx
+// file: web/src/app/purchasing/[id]/page.tsx
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { supabaseBrowser } from "@/lib/supabase/browser";
 
@@ -25,14 +25,24 @@ type OrderRow = {
 
   comment: string | null;
 
-  expected_delivery_date: string | null;
+  expected_delivery_date: string | null; // stored as ISO-ish string/date in DB
   delivery_info: string | null;
 
-  confirmation_file_path: string | null;
+  confirmation_file_path: string | null; // storage path
   purchaser_note: string | null;
 
   updated_at?: string | null;
   updated_by_name?: string | null;
+};
+
+type OrderMessageRow = {
+  id: string;
+  order_id: string;
+  created_at: string;
+  sender_email: string | null;
+  sender_name: string | null;
+  sender_role: Role | null;
+  body: string;
 };
 
 const STATUSES = [
@@ -87,6 +97,11 @@ function looksLikeMissingColumn(err: any, col: string) {
   return msg.includes("does not exist") && msg.includes(col.toLowerCase());
 }
 
+function looksLikeMissingTable(err: any, table: string) {
+  const msg = String(err?.message ?? "").toLowerCase();
+  return msg.includes("does not exist") && msg.includes(table.toLowerCase());
+}
+
 function isOrderRow(x: unknown): x is OrderRow {
   if (!x || typeof x !== "object") return false;
   const o = x as any;
@@ -99,6 +114,71 @@ function isOrderRow(x: unknown): x is OrderRow {
     typeof o.delivery_address === "string"
   );
 }
+
+/** Accepts ISO date (YYYY-MM-DD) or ISO datetime and formats to DD.MM.YYYY */
+function isoToNorDate(iso: string | null | undefined): string {
+  if (!iso) return "";
+  const s = String(iso).trim();
+  // already dd.mm.yyyy?
+  if (/^\d{2}\.\d{2}\.\d{4}$/.test(s)) return s;
+
+  // try YYYY-MM-DD first
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return `${m[3]}.${m[2]}.${m[1]}`;
+
+  // fallback: Date parse
+  try {
+    const d = new Date(s);
+    if (Number.isNaN(d.getTime())) return "";
+    const dd = String(d.getDate()).padStart(2, "0");
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const yyyy = String(d.getFullYear());
+    return `${dd}.${mm}.${yyyy}`;
+  } catch {
+    return "";
+  }
+}
+
+/** Parses DD.MM.YYYY -> YYYY-MM-DD. Returns null if empty. Throws on invalid */
+function norDateToIso(input: string): string | null {
+  const raw = String(input ?? "").trim();
+  if (!raw) return null;
+
+  const m = raw.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+  if (!m) throw new Error("Ugyldig dato. Bruk format DD.MM.YYYY (f.eks. 05.03.2026).");
+
+  const dd = Number(m[1]);
+  const mm = Number(m[2]);
+  const yyyy = Number(m[3]);
+
+  if (yyyy < 1900 || yyyy > 2100) throw new Error("Ugyldig årstall.");
+  if (mm < 1 || mm > 12) throw new Error("Ugyldig måned.");
+  if (dd < 1 || dd > 31) throw new Error("Ugyldig dag.");
+
+  // real calendar validation
+  const d = new Date(Date.UTC(yyyy, mm - 1, dd));
+  const ok =
+    d.getUTCFullYear() === yyyy && d.getUTCMonth() === mm - 1 && d.getUTCDate() === dd;
+  if (!ok) throw new Error("Datoen finnes ikke.");
+
+  return `${String(yyyy).padStart(4, "0")}-${String(mm).padStart(2, "0")}-${String(dd).padStart(
+    2,
+    "0"
+  )}`;
+}
+
+function humanRole(r: Role) {
+  if (r === "innkjøper") return "Innkjøper";
+  if (r === "admin") return "Admin";
+  return "Kunde";
+}
+
+/**
+ * Storage bucket for order confirmations.
+ * Ensure this bucket exists in Supabase Storage (private or public).
+ * Recommended: private bucket + signed URL.
+ */
+const CONFIRM_BUCKET = "order-confirmations";
 
 export default function PurchasingOrderPage() {
   const router = useRouter();
@@ -120,12 +200,25 @@ export default function PurchasingOrderPage() {
   const [order, setOrder] = useState<OrderRow | null>(null);
 
   const [status, setStatus] = useState<Status>("SUBMITTED");
-  const [eta, setEta] = useState("");
+  const [etaNor, setEtaNor] = useState(""); // DD.MM.YYYY in UI
   const [info, setInfo] = useState("");
   const [confirmPath, setConfirmPath] = useState("");
   const [note, setNote] = useState("");
 
   const [busy, setBusy] = useState(false);
+
+  // Upload
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  const [uploadBusy, setUploadBusy] = useState(false);
+  const [confirmSignedUrl, setConfirmSignedUrl] = useState<string | null>(null);
+
+  // Chat
+  const [chatEnabled, setChatEnabled] = useState(true);
+  const [messages, setMessages] = useState<OrderMessageRow[]>([]);
+  const [msgLoading, setMsgLoading] = useState(false);
+  const [msgErr, setMsgErr] = useState<string | null>(null);
+  const [msgText, setMsgText] = useState("");
+  const msgEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -183,7 +276,7 @@ export default function PurchasingOrderPage() {
         return;
       }
 
-      // hent ordre (runtime guard, ingen "as OrderRow" som TS krangler med)
+      // hent ordre
       const selectWithUpdated = [
         "id",
         "created_at",
@@ -264,7 +357,7 @@ export default function PurchasingOrderPage() {
       const st = isStatus(o.status) ? (o.status as Status) : "SUBMITTED";
       setStatus(st);
 
-      setEta(o.expected_delivery_date ?? "");
+      setEtaNor(isoToNorDate(o.expected_delivery_date));
       setInfo(o.delivery_info ?? "");
       setConfirmPath(o.confirmation_file_path ?? "");
       setNote(o.purchaser_note ?? "");
@@ -277,6 +370,42 @@ export default function PurchasingOrderPage() {
     };
   }, [id, router, supabase]);
 
+  // Signed URL for confirmation download (if private bucket)
+  useEffect(() => {
+    let alive = true;
+
+    (async () => {
+      setConfirmSignedUrl(null);
+      if (!confirmPath) return;
+
+      // If your system uses /api/local-file for downloads, you can swap to that here.
+      // For Storage bucket, we generate signed URL:
+      try {
+        const { data, error } = await supabase.storage
+          .from(CONFIRM_BUCKET)
+          .createSignedUrl(confirmPath, 600);
+
+        if (!alive) return;
+
+        if (error) {
+          // Don't hard-fail the page; just don't show URL
+          console.warn("signedUrl failed:", error);
+          setConfirmSignedUrl(null);
+          return;
+        }
+
+        setConfirmSignedUrl(data?.signedUrl ?? null);
+      } catch (e) {
+        console.warn("signedUrl exception:", e);
+        setConfirmSignedUrl(null);
+      }
+    })();
+
+    return () => {
+      alive = false;
+    };
+  }, [confirmPath, supabase]);
+
   async function saveChanges() {
     if (!order) return;
     setErr(null);
@@ -285,9 +414,17 @@ export default function PurchasingOrderPage() {
     try {
       const nowIso = new Date().toISOString();
 
+      let etaIso: string | null = null;
+      try {
+        etaIso = norDateToIso(etaNor);
+      } catch (e: any) {
+        setErr(String(e?.message ?? "Ugyldig ETA-dato."));
+        return;
+      }
+
       const basePayload: Record<string, any> = {
-        status, // alltid string, aldri null
-        expected_delivery_date: eta || null,
+        status,
+        expected_delivery_date: etaIso,
         delivery_info: info || null,
         confirmation_file_path: confirmPath || null,
         purchaser_note: note || null,
@@ -304,7 +441,7 @@ export default function PurchasingOrderPage() {
       ) {
         const fallbackPayload = {
           status,
-          expected_delivery_date: eta || null,
+          expected_delivery_date: etaIso,
           delivery_info: info || null,
           confirmation_file_path: confirmPath || null,
           purchaser_note: note || null,
@@ -324,7 +461,7 @@ export default function PurchasingOrderPage() {
           ? {
               ...prev,
               status,
-              expected_delivery_date: eta || null,
+              expected_delivery_date: etaIso,
               delivery_info: info || null,
               confirmation_file_path: confirmPath || null,
               purchaser_note: note || null,
@@ -338,6 +475,201 @@ export default function PurchasingOrderPage() {
       window.setTimeout(() => setToast(null), 1200);
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function uploadConfirmationFile(file: File) {
+    if (!order) return;
+    setErr(null);
+    setUploadBusy(true);
+
+    try {
+      const safeName = file.name.replace(/[^\w.\-()+ ]/g, "_");
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const path = `orders/${order.id}/${stamp}_${safeName}`;
+
+      const { error } = await supabase.storage.from(CONFIRM_BUCKET).upload(path, file, {
+        upsert: true,
+        contentType: file.type || "application/octet-stream",
+      });
+
+      if (error) {
+        // Common: bucket missing
+        if (String(error.message).toLowerCase().includes("bucket")) {
+          setErr(
+            `Upload feilet: Storage-bucket "${CONFIRM_BUCKET}" finnes ikke (eller du mangler tilgang). Lag bucketen i Supabase Storage, eller juster bucket-navnet i koden.`
+          );
+        } else {
+          setErr(`Upload feilet: ${error.message}`);
+        }
+        return;
+      }
+
+      // Store path on order
+      setConfirmPath(path);
+
+      // Save immediately so customer sees it
+      const nowIso = new Date().toISOString();
+      const payload: Record<string, any> = {
+        confirmation_file_path: path,
+        updated_at: nowIso,
+        updated_by_name: myName || null,
+      };
+
+      let upd = await supabaseAny.from("orders").update(payload).eq("id", order.id);
+
+      if (
+        upd.error &&
+        (looksLikeMissingColumn(upd.error, "updated_by_name") ||
+          looksLikeMissingColumn(upd.error, "updated_at"))
+      ) {
+        upd = await supabaseAny
+          .from("orders")
+          .update({ confirmation_file_path: path, updated_at: nowIso })
+          .eq("id", order.id);
+      }
+
+      if (upd.error) {
+        setErr(upd.error.message);
+        return;
+      }
+
+      setOrder((prev) =>
+        prev
+          ? {
+              ...prev,
+              confirmation_file_path: path,
+              updated_at: nowIso,
+              updated_by_name: myName || null,
+            }
+          : prev
+      );
+
+      setToast("Ordrebekreftelse lastet opp");
+      window.setTimeout(() => setToast(null), 1400);
+
+      // reset input
+      if (fileRef.current) fileRef.current.value = "";
+    } finally {
+      setUploadBusy(false);
+    }
+  }
+
+  // Chat: load + realtime subscription
+  useEffect(() => {
+    let alive = true;
+
+    async function loadMessages() {
+      setMsgErr(null);
+      setMsgLoading(true);
+
+      try {
+        const res = await supabase
+          .from("order_messages")
+          .select("id, order_id, created_at, sender_email, sender_name, sender_role, body")
+          .eq("order_id", id)
+          .order("created_at", { ascending: true });
+
+        if (!alive) return;
+
+        if (res.error) {
+          if (looksLikeMissingTable(res.error, "order_messages")) {
+            setChatEnabled(false);
+            setMessages([]);
+            setMsgErr(
+              'Chat er ikke aktivert ennå (mangler tabell "order_messages"). Si fra, så legger vi SQL-migrering for dette.'
+            );
+            return;
+          }
+          setMsgErr(res.error.message);
+          setMessages([]);
+          return;
+        }
+
+        setMessages((res.data ?? []) as OrderMessageRow[]);
+      } finally {
+        if (alive) setMsgLoading(false);
+      }
+    }
+
+    loadMessages();
+
+    // Realtime (best-effort). Requires Realtime enabled for table.
+    const channel = supabase
+      .channel(`order_messages:${id}`)
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "order_messages", filter: `order_id=eq.${id}` },
+        (payload) => {
+          const row = payload.new as any;
+          if (!row?.id) return;
+
+          setMessages((prev) => {
+            if (prev.some((m) => m.id === row.id)) return prev;
+            return [...prev, row as OrderMessageRow];
+          });
+        }
+      )
+      .subscribe();
+
+    return () => {
+      alive = false;
+      supabase.removeChannel(channel);
+    };
+  }, [id, supabase]);
+
+  useEffect(() => {
+    // auto-scroll chat to bottom
+    if (!msgEndRef.current) return;
+    msgEndRef.current.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [messages.length]);
+
+  async function sendMessage() {
+    if (!chatEnabled) return;
+    const body = msgText.trim();
+    if (!body) return;
+
+    setMsgErr(null);
+
+    try {
+      const ins = await supabase.from("order_messages").insert({
+        order_id: id,
+        body,
+        sender_email: myEmail || null,
+        sender_name: myName || null,
+        sender_role: myRole || null,
+      });
+
+      if (ins.error) {
+        if (looksLikeMissingTable(ins.error, "order_messages")) {
+          setChatEnabled(false);
+          setMsgErr(
+            'Chat er ikke aktivert ennå (mangler tabell "order_messages"). Si fra, så legger vi SQL-migrering for dette.'
+          );
+          return;
+        }
+        setMsgErr(ins.error.message);
+        return;
+      }
+
+      setMsgText("");
+      // optimistic update is not necessary if realtime is enabled, but keep a safety fetch-less UX:
+      // if realtime isn't working, we can append a local echo by refetching minimal:
+      // We'll just append locally if no realtime arrives soon.
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          order_id: id,
+          created_at: new Date().toISOString(),
+          sender_email: myEmail || null,
+          sender_name: myName || null,
+          sender_role: myRole || null,
+          body,
+        },
+      ]);
+    } catch (e: any) {
+      setMsgErr(String(e?.message ?? "Ukjent feil ved sending."));
     }
   }
 
@@ -378,7 +710,6 @@ export default function PurchasingOrderPage() {
     );
   }
 
-  // Mobil mørk, desktop lys (samme prinsipp som index-siden)
   return (
     <div
       className={cn(
@@ -399,7 +730,7 @@ export default function PurchasingOrderPage() {
           </button>
 
           <div className="text-xs text-gray-300 md:text-gray-600">
-            {myName || myEmail} · {myRole}
+            {myName || myEmail} · {humanRole(myRole)}
           </div>
         </div>
 
@@ -415,6 +746,7 @@ export default function PurchasingOrderPage() {
           </div>
         ) : null}
 
+        {/* Order card */}
         <div
           className={cn(
             "rounded-2xl border p-4 space-y-3",
@@ -469,16 +801,16 @@ export default function PurchasingOrderPage() {
             </label>
 
             <label className="text-sm">
-              ETA (YYYY-MM-DD)
+              ETA (DD.MM.YYYY)
               <input
                 className={cn(
                   "mt-1 w-full rounded-xl border px-3 py-2 text-sm outline-none",
                   "border-gray-700 bg-gray-950 text-gray-100 placeholder:text-gray-500 focus:border-gray-500",
                   "md:border-gray-300 md:bg-white md:text-gray-900 md:placeholder:text-gray-400"
                 )}
-                value={eta}
-                onChange={(e) => setEta(e.target.value)}
-                placeholder="2026-02-28"
+                value={etaNor}
+                onChange={(e) => setEtaNor(e.target.value)}
+                placeholder="05.03.2026"
                 inputMode="numeric"
               />
             </label>
@@ -497,22 +829,57 @@ export default function PurchasingOrderPage() {
               />
             </label>
 
-            <label className="text-sm">
-              Ordrebekreftelse sti (relativ)
-              <input
-                className={cn(
-                  "mt-1 w-full rounded-xl border px-3 py-2 text-sm outline-none",
-                  "border-gray-700 bg-gray-950 text-gray-100 placeholder:text-gray-500 focus:border-gray-500",
-                  "md:border-gray-300 md:bg-white md:text-gray-900 md:placeholder:text-gray-400"
-                )}
-                value={confirmPath}
-                onChange={(e) => setConfirmPath(e.target.value)}
-                placeholder="uploads/orders/ORDER-123.pdf"
-              />
-              <div className="mt-1 text-xs text-gray-400 md:text-gray-500">
-                (Senere kan vi flytte dette til Supabase Storage.)
+            {/* ✅ Restore: upload order confirmation */}
+            <div className="space-y-2">
+              <div className="text-sm font-medium">Ordrebekreftelse</div>
+
+              {confirmPath ? (
+                <div className="text-xs text-gray-400 md:text-gray-600 break-words">
+                  Lagringssti: <span className="font-mono">{confirmPath}</span>
+                </div>
+              ) : (
+                <div className="text-xs text-gray-400 md:text-gray-600">
+                  Ingen ordrebekreftelse lastet opp.
+                </div>
+              )}
+
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  ref={fileRef}
+                  type="file"
+                  accept=".pdf,image/*"
+                  className={cn(
+                    "block w-full text-sm",
+                    "file:mr-3 file:rounded-lg file:border-0 file:px-3 file:py-2 file:text-sm file:font-medium",
+                    "file:bg-white/10 file:text-gray-100 hover:file:bg-white/15",
+                    "md:file:bg-black md:file:text-white md:hover:file:opacity-90"
+                  )}
+                  disabled={uploadBusy}
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) uploadConfirmationFile(f);
+                  }}
+                />
+
+                {confirmSignedUrl ? (
+                  <a
+                    href={confirmSignedUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className={cn(
+                      "rounded-lg px-3 py-2 text-sm font-medium",
+                      "bg-white/10 hover:bg-white/15 md:bg-black md:text-white md:hover:opacity-90"
+                    )}
+                  >
+                    Last ned
+                  </a>
+                ) : null}
               </div>
-            </label>
+
+              <div className="text-[11px] text-gray-500 md:text-gray-500">
+                Lagrer i Supabase Storage-bucket: <span className="font-mono">{CONFIRM_BUCKET}</span>
+              </div>
+            </div>
 
             <label className="text-sm">
               Innkjøpernotat (internt)
@@ -538,6 +905,117 @@ export default function PurchasingOrderPage() {
             >
               {busy ? "Lagrer…" : "Lagre endringer"}
             </button>
+          </div>
+        </div>
+
+        {/* Chat */}
+        <div
+          className={cn(
+            "rounded-2xl border p-4 space-y-3",
+            "border-gray-800 bg-gray-900/40 md:border-gray-200 md:bg-white"
+          )}
+        >
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-lg font-semibold">Internchat</div>
+            <div className="text-xs text-gray-400 md:text-gray-500">
+              Chat gjelder kun denne ordren
+            </div>
+          </div>
+
+          {!chatEnabled ? (
+            <div className="rounded-xl border border-amber-700/40 bg-amber-950/40 px-4 py-3 text-sm text-amber-200 md:border-amber-200 md:bg-white md:text-amber-800">
+              {msgErr ??
+                'Chat er ikke aktivert ennå. Opprett tabell "order_messages" i databasen, så fungerer dette.'}
+            </div>
+          ) : null}
+
+          {msgErr && chatEnabled ? (
+            <div className="rounded-xl border border-red-700/40 bg-red-950/40 px-4 py-3 text-sm text-red-200 md:border-red-200 md:bg-white md:text-red-700">
+              {msgErr}
+            </div>
+          ) : null}
+
+          <div
+            className={cn(
+              "rounded-xl border p-3",
+              "border-gray-800 bg-gray-950 md:border-gray-200 md:bg-gray-50"
+            )}
+            style={{ maxHeight: 340, overflow: "auto" }}
+          >
+            {msgLoading ? (
+              <div className="text-sm text-gray-400 md:text-gray-600">Laster meldinger…</div>
+            ) : messages.length === 0 ? (
+              <div className="text-sm text-gray-400 md:text-gray-600">
+                Ingen meldinger enda. Start en samtale.
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {messages.map((m) => {
+                  const isMe = normEmail(m.sender_email) === normEmail(myEmail);
+                  const who = m.sender_name || m.sender_email || "Ukjent";
+                  const role = (m.sender_role as Role | null) ?? null;
+                  return (
+                    <div
+                      key={m.id}
+                      className={cn(
+                        "rounded-xl border px-3 py-2",
+                        isMe
+                          ? "border-emerald-700/40 bg-emerald-950/30 md:border-emerald-200 md:bg-white"
+                          : "border-gray-800 bg-gray-900 md:border-gray-200 md:bg-white"
+                      )}
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="text-xs text-gray-300 md:text-gray-600">
+                          <span className="font-medium text-gray-100 md:text-gray-900">{who}</span>
+                          {role ? (
+                            <span className="ml-2 text-[11px] text-gray-400 md:text-gray-500">
+                              · {humanRole(role)}
+                            </span>
+                          ) : null}
+                        </div>
+                        <div className="text-[11px] text-gray-400 md:text-gray-500">
+                          {formatDateTime(m.created_at)}
+                        </div>
+                      </div>
+                      <div className="mt-1 whitespace-pre-wrap text-sm text-gray-100 md:text-gray-900">
+                        {m.body}
+                      </div>
+                    </div>
+                  );
+                })}
+                <div ref={msgEndRef} />
+              </div>
+            )}
+          </div>
+
+          <div className="flex gap-2">
+            <textarea
+              rows={2}
+              value={msgText}
+              onChange={(e) => setMsgText(e.target.value)}
+              placeholder="Skriv en melding…"
+              className={cn(
+                "flex-1 rounded-xl border px-3 py-2 text-sm outline-none",
+                "border-gray-700 bg-gray-950 text-gray-100 placeholder:text-gray-500 focus:border-gray-500",
+                "md:border-gray-300 md:bg-white md:text-gray-900 md:placeholder:text-gray-400"
+              )}
+              disabled={!chatEnabled}
+            />
+            <button
+              onClick={sendMessage}
+              disabled={!chatEnabled || !msgText.trim()}
+              className={cn(
+                "shrink-0 rounded-xl px-4 py-2 text-sm font-medium disabled:opacity-50",
+                "bg-white/10 hover:bg-white/15 md:bg-black md:text-white md:hover:opacity-90"
+              )}
+              title="Send"
+            >
+              Send
+            </button>
+          </div>
+
+          <div className="text-[11px] text-gray-500 md:text-gray-500">
+            NB: For at chat skal fungere må databasen ha tabell <span className="font-mono">order_messages</span>.
           </div>
         </div>
 

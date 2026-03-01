@@ -23,6 +23,10 @@ type OrderRow = {
   // kan mangle i DB
   updated_at?: string | null;
   updated_by_name?: string | null;
+
+  // 👇 nye (kan mangle i DB – vi håndterer fallback)
+  customer_id?: string | null;
+  customer_name?: string | null;
 };
 
 function cn(...classes: Array<string | false | null | undefined>) {
@@ -58,6 +62,25 @@ function formatDateOnly(value: string | null | undefined) {
 function safeDate(s: string | null | undefined) {
   if (!s) return null;
   const d = new Date(s);
+  return Number.isFinite(d.getTime()) ? d : null;
+}
+
+function startOfDay(d: Date) {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+
+function endOfDay(d: Date) {
+  const x = new Date(d);
+  x.setHours(23, 59, 59, 999);
+  return x;
+}
+
+function parseDateInput(value: string) {
+  // <input type="date"> => "YYYY-MM-DD"
+  if (!value) return null;
+  const d = new Date(`${value}T00:00:00`);
   return Number.isFinite(d.getTime()) ? d : null;
 }
 
@@ -127,7 +150,7 @@ function badgeClass(tone: ReturnType<typeof statusTone>) {
       base,
       md,
       "border-red-700/40 bg-red-950/40 text-red-200",
-      "md:border-red-200 md:bg-red-50 md:text-red-800"
+      "md:border-red-200 md:bg-white md:text-red-700"
     );
   return cn(
     base,
@@ -140,6 +163,10 @@ function badgeClass(tone: ReturnType<typeof statusTone>) {
 function looksLikeMissingColumn(err: any, col: string) {
   const msg = String(err?.message ?? "").toLowerCase();
   return msg.includes("does not exist") && msg.includes(col.toLowerCase());
+}
+
+function norm(s: string) {
+  return s.trim().toLowerCase();
 }
 
 export default function OrdersPage() {
@@ -158,10 +185,17 @@ export default function OrdersPage() {
   const [err, setErr] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
+  // 🔎 Filtre
+  const [q, setQ] = useState<string>("");
+  const [customerFilter, setCustomerFilter] = useState<string>("__ALL__");
+  const [fromDate, setFromDate] = useState<string>(""); // YYYY-MM-DD
+  const [toDate, setToDate] = useState<string>(""); // YYYY-MM-DD
+
   const myRole: Role = (me?.role as Role) ?? "kunde";
   const myDisplayName = (me?.display_name ? String(me.display_name).trim() : "") || "—";
 
   const isAdmin = myRole === "admin";
+  const canFilterCustomers = myRole === "admin" || myRole === "innkjøper";
 
   async function getFreshToken() {
     const { data: sessRes, error: sessErr } = await supabase.auth.getSession();
@@ -192,21 +226,39 @@ export default function OrdersPage() {
       setLoading(true);
       setErr(null);
 
-      const selectWithUpdated =
+      // Vi prøver å hente kunde-felter også. Hvis de ikke finnes i DB, faller vi tilbake.
+      const selectFull =
+        "id, created_at, status, project_name, project_no, expected_delivery_date, delivery_info, confirmation_file_path, updated_at, updated_by_name, customer_id, customer_name";
+
+      const selectNoCustomer =
         "id, created_at, status, project_name, project_no, expected_delivery_date, delivery_info, confirmation_file_path, updated_at, updated_by_name";
 
       const selectBase =
         "id, created_at, status, project_name, project_no, expected_delivery_date, delivery_info, confirmation_file_path";
 
-      const r1 = await supabase.from("orders").select(selectWithUpdated).order("created_at", { ascending: false });
+      const r1 = await supabase.from("orders").select(selectFull).order("created_at", { ascending: false });
 
       let data: unknown[] | null = (r1.data as unknown[]) ?? null;
       let error: any = r1.error;
 
-      if (error && (looksLikeMissingColumn(error, "updated_at") || looksLikeMissingColumn(error, "updated_by_name"))) {
-        const r2 = await supabase.from("orders").select(selectBase).order("created_at", { ascending: false });
+      if (
+        error &&
+        (looksLikeMissingColumn(error, "updated_at") ||
+          looksLikeMissingColumn(error, "updated_by_name") ||
+          looksLikeMissingColumn(error, "customer_id") ||
+          looksLikeMissingColumn(error, "customer_name"))
+      ) {
+        // Prøv uten customer_* først
+        const r2 = await supabase.from("orders").select(selectNoCustomer).order("created_at", { ascending: false });
         data = (r2.data as unknown[]) ?? null;
         error = r2.error;
+
+        // Hvis det fortsatt feiler pga updated_*, prøv helt base.
+        if (error && (looksLikeMissingColumn(error, "updated_at") || looksLikeMissingColumn(error, "updated_by_name"))) {
+          const r3 = await supabase.from("orders").select(selectBase).order("created_at", { ascending: false });
+          data = (r3.data as unknown[]) ?? null;
+          error = r3.error;
+        }
       }
 
       if (!alive) return;
@@ -236,6 +288,63 @@ export default function OrdersPage() {
     });
     return list;
   }, [rows]);
+
+  const customerOptions = useMemo(() => {
+    // Dropdown basert på data vi faktisk har.
+    // Hvis customer_name mangler helt, vil listen bli tom (bortsett fra "Alle").
+    const uniq = new Map<string, string>(); // key -> label
+    for (const r of rows) {
+      const name = (r.customer_name ? String(r.customer_name).trim() : "") || "";
+      const id = (r.customer_id ? String(r.customer_id).trim() : "") || "";
+      if (!name && !id) continue;
+
+      const key = id || name; // stabil nøkkel hvis vi har id
+      const label = name || id;
+      if (!uniq.has(key)) uniq.set(key, label);
+    }
+    return Array.from(uniq.entries())
+      .map(([key, label]) => ({ key, label }))
+      .sort((a, b) => a.label.localeCompare(b.label, "nb"));
+  }, [rows]);
+
+  const filtered = useMemo(() => {
+    const query = norm(q);
+    const fromD = parseDateInput(fromDate);
+    const toD = parseDateInput(toDate);
+
+    const fromTs = fromD ? startOfDay(fromD).getTime() : null;
+    const toTs = toD ? endOfDay(toD).getTime() : null;
+
+    return sorted.filter((o) => {
+      // Kunde-filter (kun relevant hvis vi faktisk har kunde-data)
+      if (canFilterCustomers && customerFilter !== "__ALL__") {
+        const key = (o.customer_id ? String(o.customer_id).trim() : "") || (o.customer_name ? String(o.customer_name).trim() : "");
+        if (key !== customerFilter) return false;
+      }
+
+      // Dato-filter på created_at
+      const createdTs = new Date(o.created_at).getTime();
+      if (Number.isFinite(createdTs)) {
+        if (fromTs !== null && createdTs < fromTs) return false;
+        if (toTs !== null && createdTs > toTs) return false;
+      }
+
+      // Søk: kunde, prosjektnavn, prosjekt nr
+      if (query) {
+        const hay = [
+          o.customer_name ?? "",
+          o.project_name ?? "",
+          o.project_no ?? "",
+        ]
+          .join(" · ")
+          .toLowerCase();
+
+        if (!hay.includes(query)) return false;
+      }
+
+      return true;
+    });
+  }, [sorted, q, fromDate, toDate, canFilterCustomers, customerFilter]);
 
   async function openConfirmation(orderId: string) {
     setDownloadingId(orderId);
@@ -354,6 +463,93 @@ export default function OrdersPage() {
           </p>
         </div>
 
+        {/* 🔎 Filterbar */}
+        <div
+          className={cn(
+            "rounded-2xl border p-4 md:p-5",
+            "border-gray-800 bg-gray-900/40 md:border-gray-200 md:bg-white"
+          )}
+        >
+          <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+            <div className="flex flex-col gap-2 md:flex-row md:flex-wrap md:items-end">
+              {/* Kunde dropdown (kun for admin/innkjøper) */}
+              {canFilterCustomers ? (
+                <div className="flex flex-col gap-1">
+                  <label className="text-xs text-gray-400 md:text-gray-600">Kunde</label>
+                  <select
+                    className="h-10 rounded-xl border border-gray-700 bg-gray-950/40 px-3 text-sm text-gray-100 outline-none focus:ring-2 focus:ring-white/10 md:border-gray-300 md:bg-white md:text-gray-900"
+                    value={customerFilter}
+                    onChange={(e) => setCustomerFilter(e.target.value)}
+                  >
+                    <option value="__ALL__">Alle</option>
+                    {customerOptions.map((c) => (
+                      <option key={c.key} value={c.key}>
+                        {c.label}
+                      </option>
+                    ))}
+                  </select>
+                  {customerOptions.length === 0 ? (
+                    <div className="text-[11px] text-gray-500 md:text-gray-500">
+                      (Ingen kunde-felt i data ennå)
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {/* Dato fra/til */}
+              <div className="flex flex-col gap-1">
+                <label className="text-xs text-gray-400 md:text-gray-600">Fra dato</label>
+                <input
+                  type="date"
+                  value={fromDate}
+                  onChange={(e) => setFromDate(e.target.value)}
+                  className="h-10 rounded-xl border border-gray-700 bg-gray-950/40 px-3 text-sm text-gray-100 outline-none focus:ring-2 focus:ring-white/10 md:border-gray-300 md:bg-white md:text-gray-900"
+                />
+              </div>
+
+              <div className="flex flex-col gap-1">
+                <label className="text-xs text-gray-400 md:text-gray-600">Til dato</label>
+                <input
+                  type="date"
+                  value={toDate}
+                  onChange={(e) => setToDate(e.target.value)}
+                  className="h-10 rounded-xl border border-gray-700 bg-gray-950/40 px-3 text-sm text-gray-100 outline-none focus:ring-2 focus:ring-white/10 md:border-gray-300 md:bg-white md:text-gray-900"
+                />
+              </div>
+
+              {/* Søk */}
+              <div className="flex flex-col gap-1 md:min-w-[320px]">
+                <label className="text-xs text-gray-400 md:text-gray-600">Søk</label>
+                <input
+                  value={q}
+                  onChange={(e) => setQ(e.target.value)}
+                  placeholder="Kunde, prosjektnavn, prosjekt nr…"
+                  className="h-10 rounded-xl border border-gray-700 bg-gray-950/40 px-3 text-sm text-gray-100 outline-none placeholder:text-gray-500 focus:ring-2 focus:ring-white/10 md:border-gray-300 md:bg-white md:text-gray-900 md:placeholder:text-gray-400"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between gap-3 md:justify-end">
+              <div className="text-xs text-gray-400 md:text-gray-600">
+                Viser <span className="font-semibold text-gray-100 md:text-gray-900">{filtered.length}</span> av{" "}
+                <span className="font-semibold text-gray-100 md:text-gray-900">{sorted.length}</span>
+              </div>
+
+              <button
+                className="h-10 rounded-xl border border-gray-700 bg-gray-900 px-3 text-sm text-gray-100 hover:bg-gray-800 md:border-gray-300 md:bg-white md:text-gray-900 md:hover:bg-gray-50"
+                onClick={() => {
+                  setQ("");
+                  setFromDate("");
+                  setToDate("");
+                  setCustomerFilter("__ALL__");
+                }}
+              >
+                Nullstill
+              </button>
+            </div>
+          </div>
+        </div>
+
         {err ? (
           <div className="rounded-xl border border-red-700/40 bg-red-950/40 px-4 py-3 text-sm text-red-200 md:border-red-200 md:bg-white md:text-red-700">
             {err}
@@ -366,13 +562,13 @@ export default function OrdersPage() {
           </div>
         ) : null}
 
-        {sorted.length === 0 ? (
+        {filtered.length === 0 ? (
           <div className="rounded-2xl border border-gray-800 bg-gray-900/40 p-6 text-sm text-gray-200 md:border-gray-200 md:bg-white md:text-gray-700">
-            Du har ingen bestillinger ennå.
+            Ingen treff på filtrene dine.
           </div>
         ) : (
           <div className="space-y-3">
-            {sorted.map((o) => {
+            {filtered.map((o) => {
               const hasConfirmation = Boolean(o.confirmation_file_path);
               const busyDownload = downloadingId === o.id;
               const busyDelete = deletingId === o.id;
@@ -382,6 +578,11 @@ export default function OrdersPage() {
               const etaSoon = isEtaSoon(o.expected_delivery_date, 7);
 
               const tone = statusTone(o.status);
+
+              const customerLine =
+                canFilterCustomers && (o.customer_name || o.customer_id)
+                  ? (o.customer_name ? String(o.customer_name).trim() : "") || o.customer_id
+                  : null;
 
               return (
                 <div
@@ -399,22 +600,20 @@ export default function OrdersPage() {
 
                       <div className="text-xs text-gray-300 md:text-gray-500">
                         Sist endret:{" "}
-                        <span className="font-medium text-gray-100 md:text-gray-900">
-                          {formatDateTime(lastTs)}
-                        </span>
+                        <span className="font-medium text-gray-100 md:text-gray-900">{formatDateTime(lastTs)}</span>
                         {o.updated_by_name ? (
                           <span className="text-gray-400 md:text-gray-500"> · {o.updated_by_name}</span>
                         ) : null}
                       </div>
 
-                      <div className="text-base font-semibold text-gray-100 md:text-gray-900">
-                        {o.project_name}
-                      </div>
+                      {customerLine ? (
+                        <div className="text-sm text-gray-300 md:text-gray-600">Kunde: {customerLine}</div>
+                      ) : null}
+
+                      <div className="text-base font-semibold text-gray-100 md:text-gray-900">{o.project_name}</div>
 
                       {o.project_no ? (
-                        <div className="text-sm text-gray-300 md:text-gray-600">
-                          Prosjekt nr: {o.project_no}
-                        </div>
+                        <div className="text-sm text-gray-300 md:text-gray-600">Prosjekt nr: {o.project_no}</div>
                       ) : null}
                     </div>
 
@@ -485,9 +684,7 @@ export default function OrdersPage() {
                         {busyDownload ? "Henter lenke…" : "Last ned ordrebekreftelse"}
                       </button>
                     ) : (
-                      <div className="text-sm text-gray-400 md:text-gray-500">
-                        Ordrebekreftelse ikke tilgjengelig enda
-                      </div>
+                      <div className="text-sm text-gray-400 md:text-gray-500">Ordrebekreftelse ikke tilgjengelig enda</div>
                     )}
 
                     {isAdmin ? (

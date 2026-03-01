@@ -1,7 +1,7 @@
 // file: web/src/app/orders/[id]/page.tsx
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { supabaseBrowser } from "@/lib/supabase/browser";
 
@@ -38,6 +38,16 @@ type OrderItemRow = {
   name: string;
   unit_price: number;
   qty: number;
+};
+
+type OrderMessageRow = {
+  id: string;
+  order_id: string;
+  created_at: string;
+  sender_email: string | null;
+  sender_name: string | null;
+  sender_role: Role | null;
+  body: string;
 };
 
 function cn(...classes: Array<string | false | null | undefined>) {
@@ -130,6 +140,15 @@ function safeNumber(n: unknown) {
   return Number.isFinite(x) ? x : 0;
 }
 
+function normEmail(s: unknown) {
+  return String(s ?? "").trim().toLowerCase();
+}
+
+function looksLikeMissingTable(err: any, table: string) {
+  const msg = String(err?.message ?? "").toLowerCase();
+  return msg.includes("does not exist") && msg.includes(table.toLowerCase());
+}
+
 // Type guard: sørger for at vi faktisk har en OrderRow før vi setter state
 function isOrderRow(x: unknown): x is OrderRow {
   if (!x || typeof x !== "object") return false;
@@ -142,6 +161,12 @@ function isOrderRow(x: unknown): x is OrderRow {
     typeof o.contact_name === "string" &&
     typeof o.delivery_address === "string"
   );
+}
+
+function humanRole(r: Role | null | undefined) {
+  if (r === "innkjøper") return "Innkjøper";
+  if (r === "admin") return "Admin";
+  return "Kunde";
 }
 
 export default function OrderDetailsPage() {
@@ -162,6 +187,14 @@ export default function OrderDetailsPage() {
   const [downloading, setDownloading] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+
+  // Chat
+  const [chatEnabled, setChatEnabled] = useState(true);
+  const [messages, setMessages] = useState<OrderMessageRow[]>([]);
+  const [msgLoading, setMsgLoading] = useState(false);
+  const [msgErr, setMsgErr] = useState<string | null>(null);
+  const [msgText, setMsgText] = useState("");
+  const msgEndRef = useRef<HTMLDivElement | null>(null);
 
   const isAdmin = myRole === "admin";
   const orderId = params?.id;
@@ -294,6 +327,76 @@ export default function OrderDetailsPage() {
     };
   }, [orderId, router, supabase]);
 
+  // Chat: load + realtime subscription (best-effort)
+  useEffect(() => {
+    if (!orderId) return;
+
+    let alive = true;
+
+    async function loadMessages() {
+      setMsgErr(null);
+      setMsgLoading(true);
+
+      try {
+        const res = await supabase
+          .from("order_messages")
+          .select("id, order_id, created_at, sender_email, sender_name, sender_role, body")
+          .eq("order_id", orderId)
+          .order("created_at", { ascending: true });
+
+        if (!alive) return;
+
+        if (res.error) {
+          if (looksLikeMissingTable(res.error, "order_messages")) {
+            setChatEnabled(false);
+            setMessages([]);
+            setMsgErr(
+              'Chat er ikke aktivert ennå (mangler tabell "order_messages"). Vi kan legge SQL/RLS for dette.'
+            );
+            return;
+          }
+          setMsgErr(res.error.message);
+          setMessages([]);
+          return;
+        }
+
+        setChatEnabled(true);
+        setMessages((res.data ?? []) as OrderMessageRow[]);
+      } finally {
+        if (alive) setMsgLoading(false);
+      }
+    }
+
+    loadMessages();
+
+    const channel = supabase
+      .channel(`order_messages:${orderId}`)
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "order_messages", filter: `order_id=eq.${orderId}` },
+        (payload) => {
+          const row = payload.new as any;
+          if (!row?.id) return;
+
+          setMessages((prev) => {
+            if (prev.some((m) => m.id === row.id)) return prev;
+            return [...prev, row as OrderMessageRow];
+          });
+        }
+      )
+      .subscribe();
+
+    return () => {
+      alive = false;
+      supabase.removeChannel(channel);
+    };
+  }, [orderId, supabase]);
+
+  useEffect(() => {
+    if (!msgEndRef.current) return;
+    msgEndRef.current.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [messages.length]);
+
   const total = useMemo(() => {
     return items.reduce((sum, x) => sum + safeNumber(x.unit_price) * safeNumber(x.qty), 0);
   }, [items]);
@@ -375,6 +478,54 @@ export default function OrderDetailsPage() {
     }
   }
 
+  async function sendMessage() {
+    if (!orderId || !chatEnabled) return;
+    const body = msgText.trim();
+    if (!body) return;
+
+    setMsgErr(null);
+
+    try {
+      const ins = await supabase.from("order_messages").insert({
+        order_id: orderId,
+        body,
+        sender_email: myEmail || null,
+        sender_name: myDisplayName || null,
+        sender_role: myRole || null,
+      });
+
+      if (ins.error) {
+        if (looksLikeMissingTable(ins.error, "order_messages")) {
+          setChatEnabled(false);
+          setMsgErr(
+            'Chat er ikke aktivert ennå (mangler tabell "order_messages"). Vi kan legge SQL/RLS for dette.'
+          );
+          return;
+        }
+        setMsgErr(ins.error.message);
+        return;
+      }
+
+      setMsgText("");
+
+      // local echo fallback (if realtime isn't enabled)
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          order_id: orderId,
+          created_at: new Date().toISOString(),
+          sender_email: myEmail || null,
+          sender_name: myDisplayName || null,
+          sender_role: myRole || null,
+          body,
+        },
+      ]);
+    } catch (e: any) {
+      setMsgErr(String(e?.message ?? "Ukjent feil ved sending."));
+    }
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-950 text-gray-100 md:bg-white md:text-gray-900 p-6">
@@ -449,7 +600,9 @@ export default function OrderDetailsPage() {
               </div>
 
               {order.project_no ? (
-                <div className="text-sm text-gray-300 md:text-gray-600">Prosjekt nr: {order.project_no}</div>
+                <div className="text-sm text-gray-300 md:text-gray-600">
+                  Prosjekt nr: {order.project_no}
+                </div>
               ) : null}
 
               <div
@@ -477,15 +630,15 @@ export default function OrderDetailsPage() {
                         diff < 0
                           ? "text-red-300 md:text-red-700"
                           : diff <= 3
-                            ? "text-amber-300 md:text-amber-700"
-                            : "text-gray-400 md:text-gray-600"
+                          ? "text-amber-300 md:text-amber-700"
+                          : "text-gray-400 md:text-gray-600"
                       )}
                     >
                       {diff < 0
                         ? `${Math.abs(diff)} dager forsinket`
                         : diff === 0
-                          ? "Levering i dag"
-                          : `${diff} dager til levering`}
+                        ? "Levering i dag"
+                        : `${diff} dager til levering`}
                     </div>
                   ) : null}
                 </div>
@@ -520,7 +673,10 @@ export default function OrderDetailsPage() {
               )}
 
               <div className="rounded-xl border border-gray-800 bg-gray-950/40 px-4 py-2 text-sm md:border-gray-200 md:bg-white">
-                Sum: <span className="font-semibold text-gray-100 md:text-gray-900">{formatNok(total)}</span>
+                Sum:{" "}
+                <span className="font-semibold text-gray-100 md:text-gray-900">
+                  {formatNok(total)}
+                </span>
               </div>
 
               {isAdmin ? (
@@ -534,7 +690,9 @@ export default function OrderDetailsPage() {
                 </button>
               ) : null}
 
-              {toast ? <div className="text-xs text-emerald-300 md:text-green-700">{toast}</div> : null}
+              {toast ? (
+                <div className="text-xs text-emerald-300 md:text-green-700">{toast}</div>
+              ) : null}
             </div>
           </div>
         </div>
@@ -550,12 +708,14 @@ export default function OrderDetailsPage() {
               </div>
               {order.contact_phone ? (
                 <div className="text-gray-200 md:text-gray-800">
-                  <span className="text-gray-400 md:text-gray-600">Telefon:</span> {order.contact_phone}
+                  <span className="text-gray-400 md:text-gray-600">Telefon:</span>{" "}
+                  {order.contact_phone}
                 </div>
               ) : null}
               {order.contact_email ? (
                 <div className="text-gray-200 md:text-gray-800">
-                  <span className="text-gray-400 md:text-gray-600">E-post:</span> {order.contact_email}
+                  <span className="text-gray-400 md:text-gray-600">E-post:</span>{" "}
+                  {order.contact_email}
                 </div>
               ) : null}
             </div>
@@ -564,7 +724,9 @@ export default function OrderDetailsPage() {
           <section className="rounded-2xl border border-gray-800 bg-gray-900/40 p-4 md:p-5 md:border-gray-200 md:bg-white space-y-3">
             <h2 className="font-semibold text-gray-100 md:text-gray-900">Levering</h2>
             <div className="text-sm space-y-1">
-              <div className="whitespace-pre-line text-gray-200 md:text-gray-800">{order.delivery_address}</div>
+              <div className="whitespace-pre-line text-gray-200 md:text-gray-800">
+                {order.delivery_address}
+              </div>
               <div className="text-gray-200 md:text-gray-800">
                 {[order.delivery_postcode, order.delivery_city].filter(Boolean).join(" ")}
               </div>
@@ -576,7 +738,9 @@ export default function OrderDetailsPage() {
         {order.comment ? (
           <section className="rounded-2xl border border-gray-800 bg-gray-900/40 p-4 md:p-5 md:border-gray-200 md:bg-white space-y-2">
             <h2 className="font-semibold text-gray-100 md:text-gray-900">Kommentar</h2>
-            <p className="text-sm text-gray-200 md:text-gray-800 whitespace-pre-line">{order.comment}</p>
+            <p className="text-sm text-gray-200 md:text-gray-800 whitespace-pre-line">
+              {order.comment}
+            </p>
           </section>
         ) : null}
 
@@ -608,12 +772,26 @@ export default function OrderDetailsPage() {
                           <div className="mt-1 text-xs text-gray-300">
                             Antall: <span className="font-medium text-gray-100">{x.qty}</span>
                           </div>
+
+                          <div className="mt-2">
+                            <button
+                              className="rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-xs text-gray-100 hover:bg-gray-800"
+                              onClick={() => router.push(`/products/${x.product_id}`)}
+                              title="Åpne produkt for dokumenter og detaljer"
+                            >
+                              Åpne produkt
+                            </button>
+                          </div>
                         </div>
+
                         <div className="text-right shrink-0">
                           <div className="text-xs text-gray-400">Pris</div>
-                          <div className="text-sm font-semibold text-gray-100">{formatNok(safeNumber(x.unit_price))}</div>
+                          <div className="text-sm font-semibold text-gray-100">
+                            {formatNok(safeNumber(x.unit_price))}
+                          </div>
                         </div>
                       </div>
+
                       <div className="mt-2 flex items-center justify-between">
                         <div className="text-xs text-gray-400">Linjesum</div>
                         <div className="text-sm font-semibold text-gray-100">{formatNok(line)}</div>
@@ -637,7 +815,8 @@ export default function OrderDetailsPage() {
                       <th className="border-b py-2 pr-3">Navn</th>
                       <th className="border-b py-2 pr-3 text-right">Antall</th>
                       <th className="border-b py-2 pr-3 text-right">Pris</th>
-                      <th className="border-b py-2 text-right">Linjesum</th>
+                      <th className="border-b py-2 pr-3 text-right">Linjesum</th>
+                      <th className="border-b py-2 text-right">Handling</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -648,15 +827,26 @@ export default function OrderDetailsPage() {
                           <td className="border-b py-2 pr-3 font-medium">{x.product_no}</td>
                           <td className="border-b py-2 pr-3">{x.name}</td>
                           <td className="border-b py-2 pr-3 text-right">{x.qty}</td>
-                          <td className="border-b py-2 pr-3 text-right">{formatNok(safeNumber(x.unit_price))}</td>
-                          <td className="border-b py-2 text-right">{formatNok(line)}</td>
+                          <td className="border-b py-2 pr-3 text-right">
+                            {formatNok(safeNumber(x.unit_price))}
+                          </td>
+                          <td className="border-b py-2 pr-3 text-right">{formatNok(line)}</td>
+                          <td className="border-b py-2 text-right">
+                            <button
+                              className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs text-gray-900 hover:bg-gray-50"
+                              onClick={() => router.push(`/products/${x.product_id}`)}
+                              title="Åpne produkt for dokumenter og detaljer"
+                            >
+                              Åpne produkt
+                            </button>
+                          </td>
                         </tr>
                       );
                     })}
                   </tbody>
                   <tfoot>
                     <tr>
-                      <td colSpan={4} className="pt-3 text-right font-semibold">
+                      <td colSpan={5} className="pt-3 text-right font-semibold">
                         Total
                       </td>
                       <td className="pt-3 text-right font-semibold">{formatNok(total)}</td>
@@ -666,6 +856,111 @@ export default function OrderDetailsPage() {
               </div>
             </>
           )}
+        </section>
+
+        {/* Chat */}
+        <section className="rounded-2xl border border-gray-800 bg-gray-900/40 p-4 md:p-5 md:border-gray-200 md:bg-white space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="font-semibold text-gray-100 md:text-gray-900">Internchat</h2>
+            <div className="text-xs text-gray-400 md:text-gray-500">
+              Innkjøper og kunde kan kommunisere her
+            </div>
+          </div>
+
+          {!chatEnabled ? (
+            <div className="rounded-xl border border-amber-700/40 bg-amber-950/40 px-4 py-3 text-sm text-amber-200 md:border-amber-200 md:bg-white md:text-amber-800">
+              {msgErr ??
+                'Chat er ikke aktivert ennå (mangler tabell "order_messages"). Vi kan legge SQL/RLS for dette.'}
+            </div>
+          ) : null}
+
+          {msgErr && chatEnabled ? (
+            <div className="rounded-xl border border-red-700/40 bg-red-950/40 px-4 py-3 text-sm text-red-200 md:border-red-200 md:bg-white md:text-red-700">
+              {msgErr}
+            </div>
+          ) : null}
+
+          <div
+            className={cn(
+              "rounded-xl border p-3",
+              "border-gray-800 bg-gray-950 md:border-gray-200 md:bg-gray-50"
+            )}
+            style={{ maxHeight: 340, overflow: "auto" }}
+          >
+            {msgLoading ? (
+              <div className="text-sm text-gray-400 md:text-gray-600">Laster meldinger…</div>
+            ) : messages.length === 0 ? (
+              <div className="text-sm text-gray-400 md:text-gray-600">
+                Ingen meldinger enda. Skriv en melding under.
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {messages.map((m) => {
+                  const isMe = normEmail(m.sender_email) === normEmail(myEmail);
+                  const who = m.sender_name || m.sender_email || "Ukjent";
+                  const role = m.sender_role ?? null;
+
+                  return (
+                    <div
+                      key={m.id}
+                      className={cn(
+                        "rounded-xl border px-3 py-2",
+                        isMe
+                          ? "border-emerald-700/40 bg-emerald-950/30 md:border-emerald-200 md:bg-white"
+                          : "border-gray-800 bg-gray-900 md:border-gray-200 md:bg-white"
+                      )}
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="text-xs text-gray-300 md:text-gray-600">
+                          <span className="font-medium text-gray-100 md:text-gray-900">{who}</span>
+                          <span className="ml-2 text-[11px] text-gray-400 md:text-gray-500">
+                            · {humanRole(role)}
+                          </span>
+                        </div>
+                        <div className="text-[11px] text-gray-400 md:text-gray-500">
+                          {formatDateTime(m.created_at)}
+                        </div>
+                      </div>
+                      <div className="mt-1 whitespace-pre-wrap text-sm text-gray-100 md:text-gray-900">
+                        {m.body}
+                      </div>
+                    </div>
+                  );
+                })}
+                <div ref={msgEndRef} />
+              </div>
+            )}
+          </div>
+
+          <div className="flex gap-2">
+            <textarea
+              rows={2}
+              value={msgText}
+              onChange={(e) => setMsgText(e.target.value)}
+              placeholder="Skriv en melding…"
+              className={cn(
+                "flex-1 rounded-xl border px-3 py-2 text-sm outline-none",
+                "border-gray-700 bg-gray-950 text-gray-100 placeholder:text-gray-500 focus:border-gray-500",
+                "md:border-gray-300 md:bg-white md:text-gray-900 md:placeholder:text-gray-400"
+              )}
+              disabled={!chatEnabled}
+            />
+            <button
+              onClick={sendMessage}
+              disabled={!chatEnabled || !msgText.trim()}
+              className={cn(
+                "shrink-0 rounded-xl px-4 py-2 text-sm font-medium disabled:opacity-50",
+                "bg-white/10 hover:bg-white/15 md:bg-black md:text-white md:hover:opacity-90"
+              )}
+              title="Send"
+            >
+              Send
+            </button>
+          </div>
+
+          <div className="text-[11px] text-gray-500 md:text-gray-500">
+            NB: Chat krever tabell <span className="font-mono">order_messages</span>.
+          </div>
         </section>
       </div>
     </div>
